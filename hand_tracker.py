@@ -52,9 +52,9 @@ class HandState:
     """Stato della mano rilevata in un singolo frame."""
     detected: bool = False
     drawing: bool = False
-    easter_egg: bool = False
     fist_closed: bool = False
     precision_erasing: bool = False
+    thumbs_down: bool = False   # Pollice in giù = cancella tutto
     canvas_x: int = -1
     canvas_y: int = -1
     raw_x: float = 0.0          # Posizione X normalizzata smorzata (0–1)
@@ -79,8 +79,21 @@ class HandTracker:
     ERASE_SPEED_THRESHOLD = 1.0
     ERASE_HISTORY_FRAMES = 8
 
+    # Eraser: quanti frame il gesto deve essere stabile per attivarsi
+    ERASER_ACTIVATE_FRAMES = 3
+    # Grace period: non attivare l'eraser se si stava disegnando meno di N frame fa
+    ERASER_POST_DRAW_GRACE = 8
+
+    # Thumbs Down: quanti frame il gesto deve essere stabile per attivarsi
+    THUMBS_DOWN_ACTIVATE_FRAMES = 5
+
     # Smoothing (Filtro EMA: Alpha più basso = più fluido ma più lag)
     EMA_ALPHA = 0.35
+
+    # Margini della zona attiva (percentuale, 0.0-0.5)
+    # Permette di mappare solo la zona centrale della webcam ai LED
+    ACTIVE_MARGIN_X = 0.10  # 10% margine a sinistra e destra
+    ACTIVE_MARGIN_Y = 0.10  # 10% margine sopra e sotto
 
     MODEL_FILENAME = "hand_landmarker.task"
 
@@ -113,7 +126,7 @@ class HandTracker:
         )
         self.detector = HandLandmarker.create_from_options(options)
 
-        # Stato interno per mano (storico)
+        # Stato interno per mano (storico) — chiave: "Left" o "Right"
         self._hand_histories = {}
 
     def _get_history(self, hand_label: str) -> dict:
@@ -123,7 +136,13 @@ class HandTracker:
                 'drawing_grace_counter': 0,
                 'smoothed_pos': None,
                 'last_fist_time': 0.0,
-                'fist_confidence_counter': 0
+                'fist_confidence_counter': 0,
+                'eraser_confidence_counter': 0,
+                'was_erasing': False,
+                'frames_since_drawing': 999,  # grande = non stava disegnando
+                'prev_wrist_pos': None,  # Per calcolo velocità polso
+                'thumbs_down_counter': 0,
+                'last_thumbs_down_time': 0.0,
             }
         return self._hand_histories[hand_label]
 
@@ -174,14 +193,79 @@ class HandTracker:
         pinky_up = self._is_finger_extended(landmarks, PINKY_TIP, PINKY_PIP)
         return middle_up and not index_up and not ring_up and not pinky_up
 
-    def _detect_precision_eraser(self, landmarks) -> bool:
-        """Rileva se c'è SOLO il dito indice alzato (Cancellino di precisione)."""
+    def _detect_precision_eraser_raw(self, landmarks) -> bool:
+        """Rileva se c'è SOLO il dito indice alzato (Cancellino di precisione).
+        Ora richiede anche che il pollice sia piegato per evitare falsi positivi."""
         index_up = self._is_finger_extended(landmarks, INDEX_TIP, INDEX_PIP)
         middle_up = self._is_finger_extended(landmarks, MIDDLE_TIP, MIDDLE_PIP)
         ring_up = self._is_finger_extended(landmarks, RING_TIP, RING_PIP)
         pinky_up = self._is_finger_extended(landmarks, PINKY_TIP, PINKY_PIP)
-        # Il pollice ignorato
-        return index_up and not middle_up and not ring_up and not pinky_up
+        # Il pollice deve essere piegato (non esteso) per distinguersi da gesto "pistola"
+        thumb_dist_tip = self._distance2d(landmarks[WRIST], landmarks[THUMB_TIP])
+        thumb_dist_ip = self._distance2d(landmarks[WRIST], landmarks[THUMB_IP])
+        thumb_curled = thumb_dist_tip < thumb_dist_ip * 1.3
+        return index_up and not middle_up and not ring_up and not pinky_up and thumb_curled
+
+    def _detect_precision_eraser(self, landmarks, history: dict) -> bool:
+        """Eraser con isteresi multi-frame + grace period post-drawing."""
+        raw = self._detect_precision_eraser_raw(landmarks)
+
+        # Grace period: non attivare l'eraser se si stava disegnando poco fa
+        if history['frames_since_drawing'] < self.ERASER_POST_DRAW_GRACE:
+            history['eraser_confidence_counter'] = 0
+            history['was_erasing'] = False
+            return False
+
+        if raw:
+            history['eraser_confidence_counter'] += 1
+        else:
+            history['eraser_confidence_counter'] = max(0, history['eraser_confidence_counter'] - 1)
+
+        if history['was_erasing']:
+            # Per smettere di cancellare: contatore deve scendere a 0
+            history['was_erasing'] = history['eraser_confidence_counter'] > 0
+        else:
+            # Per attivare: serve stabilità multi-frame
+            history['was_erasing'] = history['eraser_confidence_counter'] >= self.ERASER_ACTIVATE_FRAMES
+
+        return history['was_erasing']
+
+    def _detect_thumbs_down(self, landmarks, history: dict) -> bool:
+        """Rileva il gesto 'pollice in giù' per cancellare la lavagna.
+        Requisiti: pollice esteso verso il basso, tutte le altre 4 dita piegate.
+        Con isteresi multi-frame per evitare falsi positivi."""
+        # 1. Il pollice deve puntare verso il basso: thumb_tip.y > wrist.y
+        #    (nelle coordinate normalizzate, y cresce verso il basso)
+        thumb_tip = landmarks[THUMB_TIP]
+        wrist = landmarks[WRIST]
+        thumb_points_down = thumb_tip.y > wrist.y + 0.05  # margine minimo
+
+        # 2. Il pollice deve essere esteso (non piegato)
+        thumb_extended = self._distance2d(wrist, thumb_tip) > self._distance2d(wrist, landmarks[THUMB_IP]) * 1.1
+
+        # 3. Tutte le altre 4 dita devono essere piegate
+        index_curled = not self._is_finger_extended(landmarks, INDEX_TIP, INDEX_PIP)
+        middle_curled = not self._is_finger_extended(landmarks, MIDDLE_TIP, MIDDLE_PIP)
+        ring_curled = not self._is_finger_extended(landmarks, RING_TIP, RING_PIP)
+        pinky_curled = not self._is_finger_extended(landmarks, PINKY_TIP, PINKY_PIP)
+        all_curled = index_curled and middle_curled and ring_curled and pinky_curled
+
+        raw_thumbs_down = thumb_points_down and thumb_extended and all_curled
+
+        # Isteresi multi-frame
+        if raw_thumbs_down:
+            history['thumbs_down_counter'] += 1
+        else:
+            history['thumbs_down_counter'] = max(0, history['thumbs_down_counter'] - 1)
+
+        # Trigger solo se stabile per N frame e fuori cooldown (1.5 secondi)
+        if (history['thumbs_down_counter'] >= self.THUMBS_DOWN_ACTIVATE_FRAMES
+                and (time.time() - history['last_thumbs_down_time'] > 1.5)):
+            history['last_thumbs_down_time'] = time.time()
+            history['thumbs_down_counter'] = 0
+            return True
+
+        return False
 
     def _detect_fist(self, landmarks) -> bool:
         """Rileva se tutte e 4 le dita principali sono piegate verso il palmo in modo molto serrato (Pugno 100%)."""
@@ -219,11 +303,21 @@ class HandTracker:
         return history['smoothed_pos']
 
     def _to_canvas_coords(self, norm_x: float, norm_y: float) -> tuple:
-        """Converte in coordinate pixel del canvas LED."""
-        # NOTA: IL frame webcam OpenCV ora viene FLIPPATO dal chiamante (minimalv2.py)
-        # Quindi NON serve flippare la x normalizzata. Lasciamo norm_x com'è!
-        cx = int(norm_x * self.canvas_width)
-        cy = int(norm_y * self.canvas_height)
+        """Converte in coordinate pixel del canvas LED.
+        Applica margini della zona attiva e compensazione.
+        """
+        # Rimappa da [margin, 1-margin] → [0, 1]
+        mx = self.ACTIVE_MARGIN_X
+        my = self.ACTIVE_MARGIN_Y
+        remapped_x = (norm_x - mx) / (1.0 - 2.0 * mx)
+        remapped_y = (norm_y - my) / (1.0 - 2.0 * my)
+
+        # Clamp a [0, 1]
+        remapped_x = max(0.0, min(1.0, remapped_x))
+        remapped_y = max(0.0, min(1.0, remapped_y))
+
+        cx = int(remapped_x * self.canvas_width)
+        cy = int(remapped_y * self.canvas_height)
 
         cx = max(0, min(cx, self.canvas_width - 1))
         cy = max(0, min(cy, self.canvas_height - 1))
@@ -250,17 +344,25 @@ class HandTracker:
             return []
 
         hand_states = []
+        # BUG-2 FIX: Traccia quali chiavi sono attive in questo frame
+        active_keys = set()
+        
         for i, landmarks in enumerate(result.hand_landmarks):
             state = HandState()
             
             # Identifica se mano Destra o Sinistra (per separare lo storico)
             hand_label = "Unknown"
             if result.handedness and len(result.handedness) > i:
-                hand_label = result.handedness[i][0].category_name # Es. "Left" o "Right"
+                hand_label = result.handedness[i][0].category_name  # Es. "Left" o "Right"
                 state.confidence = result.handedness[i][0].score
             
-            # Assicuriamoci che ogni mano trovata abbia un identificatore univoco anche se hand_label si ripete per qualche bug
-            hand_key = f"{hand_label}_{i}"
+            # BUG-2 FIX: Usa solo il label della mano come chiave stabile.
+            # Se MediaPipe restituisce due mani con lo stesso label (raro bug),
+            # aggiungiamo un suffisso solo per la seconda occorrenza.
+            hand_key = hand_label
+            if hand_key in active_keys:
+                hand_key = f"{hand_label}_dup"
+            active_keys.add(hand_key)
             state.hand_label = hand_key
             
             history = self._get_history(hand_key)
@@ -270,8 +372,9 @@ class HandTracker:
 
             hand_size = self._get_hand_size(landmarks)
             is_pinching = self._detect_pinch(landmarks, hand_size, history)
-            is_middle = self._detect_middle_finger(landmarks)
-            is_precision_erase = self._detect_precision_eraser(landmarks)
+            # BUG-4 FIX: eraser con isteresi multi-frame
+            is_precision_erase = self._detect_precision_eraser(landmarks, history)
+            is_thumbs_down = self._detect_thumbs_down(landmarks, history)
             is_fist = self._detect_fist(landmarks)
 
             # Contatore multi-frame per il pugno chiuso (evita sfarfallii o glitch mentre disegni)
@@ -287,14 +390,13 @@ class HandTracker:
                 history['last_fist_time'] = time.time()
                 history['fist_confidence_counter'] = 0  # Resetta per limitare trigger multipli
 
-            if is_middle:
-                state.easter_egg = True
-                mid = landmarks[MIDDLE_TIP]
-                sm_x, sm_y = self._smooth_point(mid.x, mid.y, history)
-                state.raw_x, state.raw_y = sm_x, sm_y
-                state.canvas_x, state.canvas_y = self._to_canvas_coords(sm_x, sm_y)
-            elif is_pinching:
+            # Thumbs down → cancella tutto
+            if is_thumbs_down:
+                state.thumbs_down = True
+
+            if is_pinching:
                 state.drawing = True
+                history['frames_since_drawing'] = 0  # BUG-4: traccia quando si stava disegnando
                 thumb, index = landmarks[THUMB_TIP], landmarks[INDEX_TIP]
                 raw_x, raw_y = (thumb.x + index.x) / 2.0, (thumb.y + index.y) / 2.0
                 sm_x, sm_y = self._smooth_point(raw_x, raw_y, history)
@@ -308,8 +410,23 @@ class HandTracker:
                 state.canvas_x, state.canvas_y = self._to_canvas_coords(sm_x, sm_y)
             else:
                 history['smoothed_pos'] = None
+                history['frames_since_drawing'] += 1  # BUG-4: incrementa contatore
+
+            # Salva posizione polso per calcoli velocità (clap)
+            wrist = landmarks[WRIST]
+            history['prev_wrist_pos'] = (wrist.x, wrist.y)
 
             hand_states.append(state)
+
+        # BUG-2 FIX: Pulisci history di mani non più rilevate
+        stale_keys = [k for k in self._hand_histories if k not in active_keys]
+        for k in stale_keys:
+            h = self._hand_histories[k]
+            h['smoothed_pos'] = None
+            h['was_drawing'] = False
+            h['was_erasing'] = False
+            h['eraser_confidence_counter'] = 0
+            # Non eliminiamo la history, la resettiamo per evitare re-allocazioni
 
         return hand_states
 
@@ -360,15 +477,6 @@ class HandTracker:
             cv2.circle(frame_bgr, (sm_x, sm_y), 3, (0, 0, 255), -1)
             cv2.putText(frame_bgr, f"REC [{state.canvas_x},{state.canvas_y}]", 
                         (sm_x + 20, sm_y - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
-            
-        elif state.easter_egg:
-            # Mostra la posizione del dito medio
-            sm_x = int(state.raw_x * w)
-            sm_y = int(state.raw_y * h)
-            txt_size = cv2.getTextSize("EASTER EGG!", cv2.FONT_HERSHEY_DUPLEX, 0.7, 2)[0]
-            cv2.putText(frame_bgr, "EASTER EGG!", 
-                        (sm_x - txt_size[0]//2, sm_y - 30), cv2.FONT_HERSHEY_DUPLEX, 0.7, (255, 0, 255), 2)
-            cv2.circle(frame_bgr, (sm_x, sm_y), 30, (255, 0, 255), 3)
             
         # Feedback visivo del Pugno Chiuso (Cambio Colore)
         history = self._get_history(state.hand_label)

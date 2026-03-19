@@ -6,4 +6,3 @@
 
 - ANIMAZIONE PER LA LED WALL
 
-- 

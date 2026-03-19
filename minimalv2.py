@@ -822,9 +822,8 @@ def main():
     print("")
     print("  GESTI:")
     print("  Pinch (indice+pollice) = Disegna")
-    print("  Clap (Batti le mani) = Cancella lavagna")
+    print("  Pollice in giù = Cancella lavagna")
     print("  Pugno chiuso = Cambia colore pennello")
-    print("  Dito Medio = Sorpresa (Easter Egg)")
     print("-" * 50 + "\n")
     
     # --- CONNESSIONI ---
@@ -849,10 +848,6 @@ def main():
     # Cooldown cancellazione (evita cancellazioni ripetute)
     last_erase_time = 0.0
     ERASE_COOLDOWN = 1.5  # secondi tra una cancellazione e l'altra
-
-    # Cooldown easter egg
-    last_easter_egg_time = 0.0
-    EASTER_EGG_COOLDOWN = 1.0
     
     print(f"\n[LAVAGNA] Lavagna interattiva attiva! {arduino_status}")
     print(f"  Colore: {canvas_esp.get_color_name()} | Pennello: {canvas_esp.brush_size}px")
@@ -885,35 +880,16 @@ def main():
             if not is_any_drawing:
                 synth.play_note(0, 0, canvas_esp.width, canvas_esp.height, False)
 
-            # Rilevamento CLAP (Batti le mani per cancellare)
-            is_clapping = False
-            if len(hand_states) == 2:
-                # Polsi (indice 0 in MediaPipe)
-                w1 = hand_states[0].landmarks[0]
-                w2 = hand_states[1].landmarks[0]
-                dist_wrists = math.sqrt((w1[0] - w2[0])**2 + (w1[1] - w2[1])**2)
-                if dist_wrists < 0.25: # mani molto vicine (25% della larghezza schermo)
-                    is_clapping = True
-                    
-            if is_clapping and (time.time() - last_erase_time > ERASE_COOLDOWN):
-                canvas_esp.clear()
-                if canvas_arduino:
-                    canvas_arduino.clear()
-                last_erase_time = time.time()
-                print("[CANCELLA] Lavagna cancellata con CLAP!")
+            # Rilevamento POLLICE IN GIÙ per cancellare la lavagna
+            for hand_state in hand_states:
+                if hand_state.thumbs_down and (time.time() - last_erase_time > ERASE_COOLDOWN):
+                    canvas_esp.clear()
+                    if canvas_arduino:
+                        canvas_arduino.clear()
+                    last_erase_time = time.time()
+                    print("[CANCELLA] Lavagna cancellata con POLLICE IN GIÙ! 👎")
 
             for hand_state in hand_states:
-                if hand_state.easter_egg and (time.time() - last_easter_egg_time > EASTER_EGG_COOLDOWN):
-                    canvas_esp.draw_easter_egg(hand_state.canvas_x, hand_state.canvas_y)
-                    if canvas_arduino:
-                        ax = int(hand_state.raw_x * ARDUINO_COLS)
-                        ax = ARDUINO_COLS - 1 - max(0, min(ax, ARDUINO_COLS - 1))
-                        ay = int(hand_state.raw_y * ARDUINO_ROWS)
-                        ay = max(0, min(ay, ARDUINO_ROWS - 1))
-                        canvas_arduino.draw_easter_egg(ax, ay)
-                    last_easter_egg_time = time.time()
-                    print("[EASTER EGG] Forma speciale disegnata!")
-                
                 if hand_state.fist_closed:
                     current_idx = canvas_esp.get_color_index()
                     next_idx = (current_idx + 1) % len(COLOR_PALETTE)

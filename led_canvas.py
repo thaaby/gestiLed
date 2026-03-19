@@ -100,21 +100,6 @@ class LEDCanvas:
                     if 0 <= nx < self.width and 0 <= ny < self.height:
                         self.pixels[ny, nx] = color
 
-    def draw_easter_egg(self, cx: int, cy: int):
-        """Disegna una forma interattiva speciale (easter egg) centrata in (cx, cy)."""
-        color = (int(self.current_color[0]), int(self.current_color[1]), int(self.current_color[2]))
-        # Asta (colonna verticale al centro)
-        cv2.rectangle(self.pixels, (cx - 1, cy - 3), (cx + 1, cy + 4), color, -1)
-        # Basi (due cerchi/quadrati ai lati in basso)
-        cv2.circle(self.pixels, (cx - 2, cy + 4), 2, color, -1)
-        cv2.circle(self.pixels, (cx + 2, cy + 4), 2, color, -1)
-        # Punta arrotondata in alto
-        cv2.circle(self.pixels, (cx, cy - 3), 2, color, -1)
-        
-        # Resetta l'ultimo punto disegnato così non unisce i tratti via bresenham
-        self._was_drawing = False
-        self._last_x = -1
-        self._last_y = -1
 
     def _bresenham_line(self, x0: int, y0: int, x1: int, y1: int, color: tuple):
         """Algoritmo di Bresenham per tracciare una linea tra due punti.

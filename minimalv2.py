@@ -215,14 +215,9 @@ COLOR_DATABASE = [
 # ============================================================
 # CONFIGURAZIONE MAXISCHERMO ESP (MULTI-PANNELLO UDP)
 # ============================================================
-# IP dei 3 ESP (da sinistra a destra)
+ESP_ENABLED = False  # Messo a False: stiamo usando solo Arduino!
 ESP_IPS = ["192.168.1.51", "192.168.1.52", "192.168.1.60"]
 ESP_PORT = 4210
-
-# Dimensioni di ogni singolo pannello LED ESP
-PANEL_WIDTH = 15
-PANEL_HEIGHT = 44
-TOTAL_WIDTH = PANEL_WIDTH * len(ESP_IPS)  # Larghezza totale del ledwall
 
 # ============================================================
 # CONFIGURAZIONE ARDUINO VIDEO (SERIALE)
@@ -231,11 +226,16 @@ ARDUINO_ENABLED = True            # Abilita streaming video via seriale
 ARDUINO_PORT = "auto"             # Porta seriale ('auto' per rilevamento automatico)
 ARDUINO_BAUD = 500000             # Deve corrispondere al baud rate dello sketch
 ARDUINO_ROWS = 32                 # 4 pannelli impilati × 8 righe ciascuno
-ARDUINO_COLS = 32                 # Larghezza di un pannello
+ARDUINO_COLS = 32                 # Larghezza di totale delledwall
 # Configurazione Orientamento Pannelli Arduino
 ARDUINO_PANEL_W = 8               # Larghezza di un singolo pannello fisico
 ARDUINO_PANEL_H = 32              # Altezza di un singolo pannello fisico
 ARDUINO_PANELS_COUNT = 4          # Quanti pannelli ci sono
+ARDUINO_MIRROR_HORIZONTAL = True  # Specchia l'immagine solo sui LED fisici (Destra-Sinistra)
+
+# LA RISOLUZIONE PRINCIPALE DELLA LAVAGNA
+LOGICAL_WIDTH = ARDUINO_COLS
+LOGICAL_HEIGHT = ARDUINO_ROWS
 
 # Configurazione cablaggio ricavata dalla foto del retro:
 # Pannello 0 (destra): entra da sotto, esce da sopra
@@ -777,9 +777,7 @@ def main():
     print("\n" + "=" * 50)
     print("  LAVAGNA LED INTERATTIVA")
     print("  Disegna con le mani sui pannelli LED!")
-    print(f"  ESP: {len(ESP_IPS)} pannelli ({TOTAL_WIDTH}x{PANEL_HEIGHT})")
-    if ARDUINO_ENABLED:
-        print(f"  Arduino: {ARDUINO_COLS}x{ARDUINO_ROWS} video seriale")
+    print(f"  Arduino: {ARDUINO_COLS}x{ARDUINO_ROWS} video seriale")
     print("=" * 50)
     
     camera_id = 0
@@ -796,19 +794,28 @@ def main():
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
     
     # --- INIZIALIZZA HAND TRACKER E CANVAS ---
-    # Canvas ESP (multi-pannello)
-    canvas_esp = LEDCanvas(TOTAL_WIDTH, PANEL_HEIGHT)
+    # Define logical dimensions based on Arduino for the primary canvas
+    LOGICAL_WIDTH = ARDUINO_COLS
+    LOGICAL_HEIGHT = ARDUINO_ROWS
 
-    # Canvas Arduino (se abilitato e con dimensioni diverse)
-    canvas_arduino = None
-    if ARDUINO_ENABLED and (ARDUINO_COLS != TOTAL_WIDTH or ARDUINO_ROWS != PANEL_HEIGHT):
-        canvas_arduino = LEDCanvas(ARDUINO_COLS, ARDUINO_ROWS)
-
-    print("[INIT] Avvio motore audio Sinfonia Rilassante...")
+    # Audio synth
     synth = AudioSynth()
 
-    # Usa le dimensioni ESP come riferimento per il tracker
-    tracker = HandTracker(TOTAL_WIDTH, PANEL_HEIGHT)
+    # Tracker inizializzato con la VERA risoluzione logica: 32x32
+    tracker = HandTracker(canvas_width=LOGICAL_WIDTH, canvas_height=LOGICAL_HEIGHT)
+    
+    # Canvas principale
+    canvas_led = LEDCanvas(LOGICAL_WIDTH, LOGICAL_HEIGHT)
+    
+    # Rimuoviamo il doppio array (ESP vs Arduino), usiamo una sola tela 32x32!
+    
+    # Telecamera
+    cam_id = select_camera()
+
+    print("[INIT] Avvio motore audio Sinfonia Rilassante...")
+
+    # Usa le dimensioni originarie come commento.
+    # tracker = HandTracker(LOGICAL_WIDTH, LOGICAL_HEIGHT)
     
     print("\n" + "-" * 50)
     print("  CONTROLLI:")
@@ -817,6 +824,7 @@ def main():
     print("  [C]     - Cancella lavagna")
     print("  [S]     - Salva disegno come PNG")
     print("  [I]     - Inverti colori (Common Anode)")
+    print("  [T]     - Attiva/Disattiva Modalità Test Matrice (Calibrazione)")
     print("  [F]     - Fullscreen (toggle)")
     print("  [Q/ESC] - Esci")
     print("")
@@ -849,8 +857,17 @@ def main():
     last_erase_time = 0.0
     ERASE_COOLDOWN = 1.5  # secondi tra una cancellazione e l'altra
     
+    # Variabili Calibrazione
+    calibration_mode = False
+    calib_x = 0
+    calib_y = 0
+    last_calib_time = time.time()
+
+    # ESP sending timer
+    esp_timer = 0.0
+    
     print(f"\n[LAVAGNA] Lavagna interattiva attiva! {arduino_status}")
-    print(f"  Colore: {canvas_esp.get_color_name()} | Pennello: {canvas_esp.brush_size}px")
+    print(f"  Colore: {canvas_led.get_color_name()} | Pennello: {canvas_led.brush_size}px")
     
     try:
         while True:
@@ -869,96 +886,56 @@ def main():
             active_ids = {s.hand_label for s in hand_states}
             
             # Resetta l'interpolazione per le mani che non sono più rilevate (uscite dall'inquadratura)
-            for hid in list(canvas_esp._hand_states.keys()):
+            for hid in list(canvas_led._hand_states.keys()):
                 if hid not in active_ids:
-                    canvas_esp.draw_at(0, 0, False, hand_id=hid)
-                    if canvas_arduino:
-                        canvas_arduino.draw_at(0, 0, False, hand_id=hid)
+                    canvas_led.draw_at(0, 0, False, hand_id=hid)
             
             # Usa il sint per la "Sinfonia" se almeno una mano sta disegnando
             is_any_drawing = any(s.drawing for s in hand_states)
             if not is_any_drawing:
-                synth.play_note(0, 0, canvas_esp.width, canvas_esp.height, False)
+                synth.play_note(0, 0, canvas_led.width, canvas_led.height, False)
 
             # Rilevamento POLLICE IN GIÙ per cancellare la lavagna
             for hand_state in hand_states:
                 if hand_state.thumbs_down and (time.time() - last_erase_time > ERASE_COOLDOWN):
-                    canvas_esp.clear()
-                    if canvas_arduino:
-                        canvas_arduino.clear()
+                    canvas_led.clear()
                     last_erase_time = time.time()
                     print("[CANCELLA] Lavagna cancellata con POLLICE IN GIÙ! 👎")
 
             for hand_state in hand_states:
                 if hand_state.fist_closed:
-                    current_idx = canvas_esp.get_color_index()
+                    current_idx = canvas_led.get_color_index()
                     next_idx = (current_idx + 1) % len(COLOR_PALETTE)
-                    canvas_esp.set_color_by_index(next_idx)
-                    if canvas_arduino:
-                        canvas_arduino.set_color_by_index(next_idx)
-                    print(f"[PUGNO] Nuovo colore: {canvas_esp.get_color_name()}")
+                    canvas_led.set_color_by_index(next_idx)
+                    print(f"[PUGNO] Nuovo colore: {canvas_led.get_color_name()}")
                     
                 if hand_state.drawing:
-                    canvas_esp.draw_at(hand_state.canvas_x, hand_state.canvas_y, True, hand_id=hand_state.hand_label, is_erasing=False)
+                    canvas_led.draw_at(hand_state.canvas_x, hand_state.canvas_y, True, hand_id=hand_state.hand_label, is_erasing=False)
                     # Riproduciamo la nota usando le coordinate della mano che sta disegnando
-                    synth.play_note(hand_state.canvas_x, hand_state.canvas_y, canvas_esp.width, canvas_esp.height, True)
+                    synth.play_note(hand_state.canvas_x, hand_state.canvas_y, canvas_led.width, canvas_led.height, True)
                     
-                    if canvas_arduino:
-                        ax = int(hand_state.raw_x * ARDUINO_COLS)
-                        ax = ARDUINO_COLS - 1 - max(0, min(ax, ARDUINO_COLS - 1))
-                        ay = int(hand_state.raw_y * ARDUINO_ROWS)
-                        ay = max(0, min(ay, ARDUINO_ROWS - 1))
-                        canvas_arduino.draw_at(ax, ay, True, hand_id=hand_state.hand_label, is_erasing=False)
-                        
                 elif hand_state.precision_erasing:
                     # Gesto Cancellino di precisione (Solo dito Indice puntato)
-                    canvas_esp.draw_at(hand_state.canvas_x, hand_state.canvas_y, True, hand_id=hand_state.hand_label, is_erasing=True)
-                    if canvas_arduino:
-                        ax = int(hand_state.raw_x * ARDUINO_COLS)
-                        ax = ARDUINO_COLS - 1 - max(0, min(ax, ARDUINO_COLS - 1))
-                        ay = int(hand_state.raw_y * ARDUINO_ROWS)
-                        ay = max(0, min(ay, ARDUINO_ROWS - 1))
-                        canvas_arduino.draw_at(ax, ay, True, hand_id=hand_state.hand_label, is_erasing=True)
+                    canvas_led.draw_at(hand_state.canvas_x, hand_state.canvas_y, True, hand_id=hand_state.hand_label, is_erasing=True)
                         
                 else:
-                    canvas_esp.draw_at(0, 0, False, hand_id=hand_state.hand_label)
-                    if canvas_arduino:
-                        canvas_arduino.draw_at(0, 0, False, hand_id=hand_state.hand_label)
+                    # Chiamata a draw_at con is_drawing=False per terminare la linea (evita collegamenti involontari)
+                    canvas_led.draw_at(hand_state.canvas_x, hand_state.canvas_y, False, hand_id=hand_state.hand_label, is_erasing=False)
             
             # --- 3. PREPARA FRAME RGB DAL CANVAS ---
-            frame_rgb = canvas_esp.get_frame_rgb()
+            # This section is now handled within the ESP and Arduino sending blocks
+            # frame_rgb = canvas_esp.get_frame_rgb() # Removed
             
             # Applica gamma
-            frame_rgb = gamma_table[frame_rgb]
+            # frame_rgb = gamma_table[frame_rgb] # Removed
             
             # Inverti colori se Common Anode
-            if COMMON_ANODE:
-                frame_rgb = 255 - frame_rgb
+            # if COMMON_ANODE: # Removed
+            #     frame_rgb = 255 - frame_rgb # Removed
             
-            # --- 4. INVIA AI PANNELLI ESP VIA UDP ---
-            if udp_sock is not None:
-                for indice, ip in enumerate(ESP_IPS):
-                    taglio_x_inizio = indice * PANEL_WIDTH
-                    taglio_x_fine = (indice + 1) * PANEL_WIDTH
-                    
-                    # Estrae la fetta per questo pannello
-                    fetta = frame_rgb[:, taglio_x_inizio:taglio_x_fine]
-                    
-                    # Traspone le assi per mandare pixel in colonne (alto->basso)
-                    fetta_colonne = np.transpose(fetta, (1, 0, 2)).astype(np.uint8)
-                    dati_grezzi = fetta_colonne.flatten().tobytes()
-                    
-                    # Taglia i dati a metà in 2 pacchetti (con byte indice)
-                    meta = len(dati_grezzi) // 2
-                    pacchetto_0 = bytes([0]) + dati_grezzi[:meta]
-                    pacchetto_1 = bytes([1]) + dati_grezzi[meta:]
-                    
-                    try:
-                        udp_sock.sendto(pacchetto_0, (ip, ESP_PORT))
-                        udp_sock.sendto(pacchetto_1, (ip, ESP_PORT))
-                        time.sleep(0.003)
-                    except Exception:
-                        pass
+            # --- 4. INVIA FRAME AGLI ESP (via UDP) ---
+            # Disabilitato: ESP_ENABLED è False
+            pass
             
             # --- 5. INVIA FRAME ALL'ARDUINO (video seriale) ---
             if arduino_ser is not None:
@@ -972,15 +949,32 @@ def main():
                 
                 if arduino_ready:
                     try:
-                        # Usa il canvas Arduino se esiste, altrimenti ridimensiona quello ESP
-                        if canvas_arduino:
-                            ard_rgb = canvas_arduino.get_frame_rgb()
-                        else:
-                            ard_rgb = cv2.resize(
-                                canvas_esp.get_frame_rgb(),
-                                (ARDUINO_COLS, ARDUINO_ROWS),
-                                interpolation=cv2.INTER_NEAREST
-                            )
+                        # Usiamo direttamente il frame logico principale che è già 32x32!
+                        ard_rgb = canvas_led.get_frame_rgb()
+                        
+                        # Inverte specularmente l'immagine se necessario per la corrispondenza fisica
+                        if ARDUINO_MIRROR_HORIZONTAL:
+                            ard_rgb = cv2.flip(ard_rgb, 1)
+                            
+                        # === INIZIO MODALITÀ CALIBRAZIONE ===
+                        if calibration_mode:
+                            ard_rgb = np.zeros((32, 32, 3), dtype=np.uint8)
+                            
+                            now_t = time.time()
+                            if now_t - last_calib_time > 0.05:  # Molto veloce, 20 pixel al secondo
+                                calib_x += 1
+                                if calib_x >= 32:
+                                    calib_x = 0
+                                    calib_y += 1
+                                    if calib_y >= 32:
+                                        calib_y = 0
+                                last_calib_time = now_t
+                                
+                            # Disegna asse orizzontale fioco
+                            ard_rgb[calib_y, :] = (50, 0, 0)      # Riga rossa fioca 
+                            ard_rgb[:, calib_x] = (0, 50, 0)      # Colonna verde fioca
+                            ard_rgb[calib_y, calib_x] = (255, 255, 255) # Punto BIANCO acceso
+                        # === FINE MODALITÀ CALIBRAZIONE ===
                         
                         ard_rgb = gamma_table[ard_rgb]
                         if COMMON_ANODE:
@@ -1003,8 +997,8 @@ def main():
                 tracker.draw_overlay(frame_preview, hand_state)
             
             # Info colore e pennello sull'overlay webcam
-            color_bgr = tuple(int(c) for c in canvas_esp.current_color[::-1])  # RGB → BGR
-            info_text = f"Colore: {canvas_esp.get_color_name()} | Pennello: {canvas_esp.brush_size}px"
+            color_bgr = tuple(int(c) for c in canvas_led.current_color[::-1])  # RGB → BGR
+            info_text = f"Colore: {canvas_led.get_color_name()} | Pennello: {canvas_led.brush_size}px"
             cv2.putText(frame_preview, info_text, (10, frame.shape[0] - 15),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, color_bgr, 2)
             
@@ -1024,7 +1018,7 @@ def main():
                     cursor_x, cursor_y = h.canvas_x, h.canvas_y
                     break
                     
-            canvas_preview = canvas_esp.get_preview(
+            canvas_preview = canvas_led.get_preview(
                 scale=15, 
                 cursor_x=cursor_x, 
                 cursor_y=cursor_y
@@ -1043,51 +1037,56 @@ def main():
                     cv2.setWindowProperty('Lavagna LED - Webcam', cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
                 else:
                     cv2.setWindowProperty('Lavagna LED - Webcam', cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_NORMAL)
+            elif key == ord('t'):
+                calibration_mode = not calibration_mode
+                state = "ATTIVA" if calibration_mode else "DISATTIVA"
+                print(f"\n[TEST] Modalità Calibrazione Matrice: {state}")
+                if calibration_mode:
+                    print("=> Guarda il pannello LED. Ora un punto bianco con una croce rosso/verde lo attraverserà.")
+                    print("=> Nota l'ordine esatto in cui questo punto si muove sui pixel fisici!")
             elif key == ord('i'):
                 COMMON_ANODE = not COMMON_ANODE
                 state = "ATTIVA" if COMMON_ANODE else "DISATTIVA"
                 print(f"\n[TOGGLE] Modalità Inversione: {state}")
             elif key == ord('c'):
-                canvas_esp.clear()
-                if canvas_arduino:
-                    canvas_arduino.clear()
+                canvas_led.clear()
+                last_erase_time = time.time()
                 print("[CANCELLA] Lavagna cancellata (tasto C)")
             elif key == ord('s'):
-                filename = canvas_esp.save_as_png()
-                print(f"[SALVA] Disegno salvato: {filename}")
+                filename = f"disegno_led_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+                img = canvas_led.get_frame_rgb()
+                cv2.imwrite(filename, cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
+                print(f"[SALVA] Immagine salvata come {filename}")
             elif key == ord('+') or key == ord('='):
-                canvas_esp.set_brush_size(canvas_esp.brush_size + 1)
-                if canvas_arduino:
-                    canvas_arduino.set_brush_size(canvas_esp.brush_size)
-                print(f"[PENNELLO] Dimensione: {canvas_esp.brush_size}px")
-            elif key == ord('-') or key == ord('_'):
-                canvas_esp.set_brush_size(canvas_esp.brush_size - 1)
-                if canvas_arduino:
-                    canvas_arduino.set_brush_size(canvas_esp.brush_size)
-                print(f"[PENNELLO] Dimensione: {canvas_esp.brush_size}px")
+                new_size = min(5, canvas_led.brush_size + 1)
+                canvas_led.set_brush_size(new_size)
+                print(f"[PENNELLO] Dimensione aumentata a {new_size}px")
+            elif key == ord('-'):
+                new_size = max(1, canvas_led.brush_size - 1)
+                canvas_led.set_brush_size(new_size)
+                print(f"[PENNELLO] Dimensione ridotta a {new_size}px")
             elif ord('1') <= key <= ord('9'):
                 idx = key - ord('1')
-                canvas_esp.set_color_by_index(idx)
-                if canvas_arduino:
-                    canvas_arduino.set_color_by_index(idx)
-                print(f"[COLORE] {canvas_esp.get_color_name()}")
+                canvas_led.set_color_by_index(idx)
+                print(f"[COLORE] Tasto {chr(key)} -> Colore impostato a {canvas_led.get_color_name()}")
     
     finally:
         tracker.release()
         cap.release()
         cv2.destroyAllWindows()
-        if udp_sock:
+        if udp_sock and ESP_ENABLED:
             try:
                 print("[LED] Spegnimento LED ESP...")
-                frame_nero = bytes(PANEL_WIDTH * PANEL_HEIGHT * 3)
+                frame_nero = bytes(15 * 44 * 3) # Dimensione fissa per spegnere
                 for ip in ESP_IPS:
                     meta = len(frame_nero) // 2
                     udp_sock.sendto(bytes([0]) + frame_nero[:meta], (ip, ESP_PORT))
                     udp_sock.sendto(bytes([1]) + frame_nero[meta:], (ip, ESP_PORT))
                     time.sleep(0.02)
-                udp_sock.close()
+                # udp_sock.close() # Keep socket open for potential reuse or let OS handle on exit
                 print("[OK] LED ESP spenti. Socket UDP chiuso.")
-            except Exception:
+            except Exception as e:
+                print(f"[X] Errore nello spegnimento LED ESP: {e}")
                 pass
         if arduino_ser:
             try:

@@ -52,15 +52,16 @@ class HandState:
     """Stato della mano rilevata in un singolo frame."""
     detected: bool = False
     drawing: bool = False
-    erasing: bool = False
     easter_egg: bool = False
-    snapped: bool = False
+    fist_closed: bool = False
+    precision_erasing: bool = False
     canvas_x: int = -1
     canvas_y: int = -1
     raw_x: float = 0.0          # Posizione X normalizzata smorzata (0–1)
     raw_y: float = 0.0          # Posizione Y normalizzata smorzata (0–1)
     confidence: float = 0.0
     landmarks: list = field(default_factory=list)
+    hand_label: str = "Unknown" # "Left" o "Right"
 
 
 class HandTracker:
@@ -104,7 +105,7 @@ class HandTracker:
         options = HandLandmarkerOptions(
             base_options=BaseOptions(model_asset_path=model_path),
             running_mode=RunningMode.LIVE_STREAM,
-            num_hands=1,
+            num_hands=2,
             min_hand_detection_confidence=min_detection_confidence,
             min_hand_presence_confidence=min_tracking_confidence,
             min_tracking_confidence=min_tracking_confidence,
@@ -112,12 +113,19 @@ class HandTracker:
         )
         self.detector = HandLandmarker.create_from_options(options)
 
-        # Stato interno
-        self._was_drawing = False
-        self._drawing_grace_counter = 0
-        self._smoothed_pos = None  # (x, y)
-        self._wrist_history = deque(maxlen=self.ERASE_HISTORY_FRAMES)
-        self._snap_history = deque(maxlen=10) # ~0.3 sec per il dinamismo dello schiocco
+        # Stato interno per mano (storico)
+        self._hand_histories = {}
+
+    def _get_history(self, hand_label: str) -> dict:
+        if hand_label not in self._hand_histories:
+            self._hand_histories[hand_label] = {
+                'was_drawing': False,
+                'drawing_grace_counter': 0,
+                'smoothed_pos': None,
+                'last_fist_time': 0.0,
+                'fist_confidence_counter': 0
+            }
+        return self._hand_histories[hand_label]
 
     def _distance2d(self, p1, p2) -> float:
         """Distanza 2D tra due landmark normalizzati."""
@@ -133,7 +141,7 @@ class HandTracker:
         dist_pip = self._distance2d(landmarks[WRIST], landmarks[pip_idx])
         return dist_tip > dist_pip * 1.15
 
-    def _detect_pinch(self, landmarks, hand_size: float) -> bool:
+    def _detect_pinch(self, landmarks, hand_size: float, history: dict) -> bool:
         """Rilevamento Pinch con Isteresi in 2D."""
         thumb = landmarks[THUMB_TIP]
         index = landmarks[INDEX_TIP]
@@ -141,58 +149,22 @@ class HandTracker:
         dist = self._distance2d(thumb, index)
         normalized_dist = dist / max(hand_size, 0.001)
 
-        if self._was_drawing:
+        if history['was_drawing']:
             # Per smettere di disegnare devi allontanare le dita più della soglia
             is_close = normalized_dist < self.PINCH_DEACTIVATE_THRESHOLD
             
             if is_close:
-                self._drawing_grace_counter = self.DRAWING_GRACE_FRAMES
+                history['drawing_grace_counter'] = self.DRAWING_GRACE_FRAMES
             else:
-                self._drawing_grace_counter -= 1
+                history['drawing_grace_counter'] -= 1
                 
-            self._was_drawing = self._drawing_grace_counter > 0
+            history['was_drawing'] = history['drawing_grace_counter'] > 0
         else:
-            self._was_drawing = normalized_dist < self.PINCH_ACTIVATE_THRESHOLD
-            if self._was_drawing:
-                self._drawing_grace_counter = self.DRAWING_GRACE_FRAMES
+            history['was_drawing'] = normalized_dist < self.PINCH_ACTIVATE_THRESHOLD
+            if history['was_drawing']:
+                history['drawing_grace_counter'] = self.DRAWING_GRACE_FRAMES
 
-        return self._was_drawing
-
-    def _detect_erase_swipe(self, landmarks) -> bool:
-        """Rileva il palmo aperto e uno scuotimento veloce orizzontale."""
-        # Se c'è un pinch, ignoriamo lo swipe
-        if self._was_drawing:
-            return False
-
-        fingers_extended = [
-            self._is_finger_extended(landmarks, INDEX_TIP, INDEX_PIP),
-            self._is_finger_extended(landmarks, MIDDLE_TIP, MIDDLE_PIP),
-            self._is_finger_extended(landmarks, RING_TIP, RING_PIP),
-            self._is_finger_extended(landmarks, PINKY_TIP, PINKY_PIP),
-        ]
-        
-        # Almeno 3 dita su (palmo aperto)
-        if sum(fingers_extended) < 3:
-            return False
-
-        wrist = landmarks[WRIST]
-        self._wrist_history.append((wrist.x, wrist.y, time.time()))
-
-        if len(self._wrist_history) < 3:
-            return False
-
-        oldest = self._wrist_history[0]
-        newest = self._wrist_history[-1]
-        dt = newest[2] - oldest[2]
-        
-        if dt < 0.01:
-            return False
-
-        dx = abs(newest[0] - oldest[0])
-        dy = abs(newest[1] - oldest[1])
-
-        speed = dx / dt
-        return speed > self.ERASE_SPEED_THRESHOLD and dx > dy * 1.5
+        return history['was_drawing']
 
     def _detect_middle_finger(self, landmarks) -> bool:
         """Rileva se c'è solo il dito medio alzato."""
@@ -202,52 +174,49 @@ class HandTracker:
         pinky_up = self._is_finger_extended(landmarks, PINKY_TIP, PINKY_PIP)
         return middle_up and not index_up and not ring_up and not pinky_up
 
-    def _detect_snap(self, hand_size: float) -> bool:
-        """
-        Rileva lo schiocco delle dita (Snap) analizzando la sequenza temporale:
-        1. Caricamento: Pollice e dito medio uniti.
-        2. Rilascio (Scatto): Il dito medio scatta e si chiude sul palmo.
-        """
-        if len(self._snap_history) < 5:
-            return False
-            
-        current = self._snap_history[-1]
+    def _detect_precision_eraser(self, landmarks) -> bool:
+        """Rileva se c'è SOLO il dito indice alzato (Cancellino di precisione)."""
+        index_up = self._is_finger_extended(landmarks, INDEX_TIP, INDEX_PIP)
+        middle_up = self._is_finger_extended(landmarks, MIDDLE_TIP, MIDDLE_PIP)
+        ring_up = self._is_finger_extended(landmarks, RING_TIP, RING_PIP)
+        pinky_up = self._is_finger_extended(landmarks, PINKY_TIP, PINKY_PIP)
+        # Il pollice ignorato
+        return index_up and not middle_up and not ring_up and not pinky_up
+
+    def _detect_fist(self, landmarks) -> bool:
+        """Rileva se tutte e 4 le dita principali sono piegate verso il palmo in modo molto serrato (Pugno 100%)."""
         
-        # 1. Condizione di scatto completato: il medio deve essere chiuso verso il palmo
-        if not current['middle_curled']:
-            return False
+        def is_tightly_curled(tip_idx, pip_idx, mcp_idx):
+            dist_tip = self._distance2d(landmarks[WRIST], landmarks[tip_idx])
+            dist_pip = self._distance2d(landmarks[WRIST], landmarks[pip_idx])
+            dist_mcp = self._distance2d(landmarks[WRIST], landmarks[mcp_idx])
             
-        # Cooldown di 1 secondo tra uno schiocco e l'altro
-        if time.time() - getattr(self, '_last_snap_time', 0) < 1.0:
-            return False
+            # Un vero pugno ha la punta del dito ripiegata all'interno. Quindi la punta 
+            # sarà molto più vicina al polso rispetto alla nocca media (PIP), ed a una distanza
+            # paragonabile a quella della nocca base (MCP).
+            return (dist_tip < dist_pip * 0.85) and (dist_tip < dist_mcp * 1.35)
 
-        # 2. Cerca nella storia recente il "caricamento" (medio e pollice uniti, e medio NON chiuso)
-        was_pinched = False
-        for i in range(len(self._snap_history) - 2):
-            past = self._snap_history[i]
-            normalized_dist = past['dist_tm'] / max(hand_size, 0.001)
-            
-            # Se erano vicini (pinch) e non era scattato
-            if normalized_dist < 0.15 and not past['middle_curled']:
-                was_pinched = True
-                break
-                
-        if was_pinched:
-            self._last_snap_time = time.time()
-            self._snap_history.clear()
-            return True
-            
-        return False
+        index_curled = is_tightly_curled(INDEX_TIP, INDEX_PIP, INDEX_MCP)
+        middle_curled = is_tightly_curled(MIDDLE_TIP, MIDDLE_PIP, MIDDLE_MCP)
+        ring_curled = is_tightly_curled(RING_TIP, RING_PIP, RING_MCP)
+        pinky_curled = is_tightly_curled(PINKY_TIP, PINKY_PIP, PINKY_MCP)
+        
+        # Aggiungiamo il pollice piegato per una sicurezza assoluta al 99.9%
+        thumb_tip = self._distance2d(landmarks[WRIST], landmarks[THUMB_TIP])
+        thumb_ip = self._distance2d(landmarks[WRIST], landmarks[THUMB_IP])
+        thumb_curled = thumb_tip < thumb_ip * 1.15
 
-    def _smooth_point(self, new_x: float, new_y: float) -> tuple:
+        return index_curled and middle_curled and ring_curled and pinky_curled and thumb_curled
+
+    def _smooth_point(self, new_x: float, new_y: float, history: dict) -> tuple:
         """Filtro esponenziale per azzerare il tremolio (Jitter)."""
-        if self._smoothed_pos is None:
-            self._smoothed_pos = (new_x, new_y)
+        if history['smoothed_pos'] is None:
+            history['smoothed_pos'] = (new_x, new_y)
         else:
-            sx = self._smoothed_pos[0] + self.EMA_ALPHA * (new_x - self._smoothed_pos[0])
-            sy = self._smoothed_pos[1] + self.EMA_ALPHA * (new_y - self._smoothed_pos[1])
-            self._smoothed_pos = (sx, sy)
-        return self._smoothed_pos
+            sx = history['smoothed_pos'][0] + self.EMA_ALPHA * (new_x - history['smoothed_pos'][0])
+            sy = history['smoothed_pos'][1] + self.EMA_ALPHA * (new_y - history['smoothed_pos'][1])
+            history['smoothed_pos'] = (sx, sy)
+        return history['smoothed_pos']
 
     def _to_canvas_coords(self, norm_x: float, norm_y: float) -> tuple:
         """Converte in coordinate pixel del canvas LED."""
@@ -261,9 +230,7 @@ class HandTracker:
 
         return cx, cy
 
-    def process_frame(self, frame_bgr) -> HandState:
-        state = HandState()
-
+    def process_frame(self, frame_bgr) -> list[HandState]:
         # In MediaPipe i frames RGB servono per la detection
         frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_rgb)
@@ -276,75 +243,75 @@ class HandTracker:
 
         result = self._latest_result
         if result is None or not result.hand_landmarks:
-            self._wrist_history.clear()
-            self._smoothed_pos = None  # Resetta lo smorzatore se la mano scompare
-            self._was_drawing = False
-            return state
+            # Resetta le mani non più rilevate
+            for h in self._hand_histories.values():
+                h['smoothed_pos'] = None
+                h['was_drawing'] = False
+            return []
 
-        landmarks = result.hand_landmarks[0]
-        state.detected = True
-        state.confidence = result.handedness[0][0].score if result.handedness and result.handedness[0] else 0.0
-        state.landmarks = [(lm.x, lm.y, lm.z) for lm in landmarks]
-
-        hand_size = self._get_hand_size(landmarks)
-        is_pinching = self._detect_pinch(landmarks, hand_size)
-        is_erasing = self._detect_erase_swipe(landmarks)
-        is_middle = self._detect_middle_finger(landmarks)
-
-        # Registra lo stato corrente per il calcolo dello schiocco (Snap)
-        thumb_tip = landmarks[THUMB_TIP]
-        middle_tip = landmarks[MIDDLE_TIP]
-        middle_pip = landmarks[MIDDLE_PIP]
-        wrist = landmarks[WRIST]
-        dist_tm = self._distance2d(thumb_tip, middle_tip)
-        middle_to_wrist = self._distance2d(middle_tip, wrist)
-        middle_pip_to_wrist = self._distance2d(middle_pip, wrist)
-        
-        self._snap_history.append({
-            'dist_tm': dist_tm,
-            'middle_curled': middle_to_wrist < middle_pip_to_wrist * 1.1, # Leggermente chiuso
-            'time': time.time()
-        })
-        
-        is_snapped = self._detect_snap(hand_size)
-        if is_snapped:
-            state.snapped = True
-
-        if is_erasing:
-            state.erasing = True
-        elif is_middle:
-            state.easter_egg = True
-            # Usiamo la punta del dito medio come coordinate
-            mid = landmarks[MIDDLE_TIP]
-            sm_x, sm_y = self._smooth_point(mid.x, mid.y)
-            state.raw_x = sm_x
-            state.raw_y = sm_y
-            state.canvas_x, state.canvas_y = self._to_canvas_coords(sm_x, sm_y)
-        elif is_pinching:
-            state.drawing = True
-            # Punto medio tra pollice e indice
-            thumb = landmarks[THUMB_TIP]
-            index = landmarks[INDEX_TIP]
-            raw_x = (thumb.x + index.x) / 2.0
-            raw_y = (thumb.y + index.y) / 2.0
+        hand_states = []
+        for i, landmarks in enumerate(result.hand_landmarks):
+            state = HandState()
             
-            # Filtro stabilizzatore per eliminare il tremolio
-            sm_x, sm_y = self._smooth_point(raw_x, raw_y)
+            # Identifica se mano Destra o Sinistra (per separare lo storico)
+            hand_label = "Unknown"
+            if result.handedness and len(result.handedness) > i:
+                hand_label = result.handedness[i][0].category_name # Es. "Left" o "Right"
+                state.confidence = result.handedness[i][0].score
             
-            state.raw_x = sm_x
-            state.raw_y = sm_y
-            state.canvas_x, state.canvas_y = self._to_canvas_coords(sm_x, sm_y)
+            # Assicuriamoci che ogni mano trovata abbia un identificatore univoco anche se hand_label si ripete per qualche bug
+            hand_key = f"{hand_label}_{i}"
+            state.hand_label = hand_key
             
-            # Non svuotare _wrist_history quando disegni, così è pronto per calcolare la delta-vel
-        else:
-            # Resetta lo smoothing quando apri le dita
-            self._smoothed_pos = None
+            history = self._get_history(hand_key)
+            
+            state.detected = True
+            state.landmarks = [(lm.x, lm.y, lm.z) for lm in landmarks]
 
-        if not is_pinching and not is_middle:
-            wrist = landmarks[WRIST]
-            self._wrist_history.append((wrist.x, wrist.y, time.time()))
+            hand_size = self._get_hand_size(landmarks)
+            is_pinching = self._detect_pinch(landmarks, hand_size, history)
+            is_middle = self._detect_middle_finger(landmarks)
+            is_precision_erase = self._detect_precision_eraser(landmarks)
+            is_fist = self._detect_fist(landmarks)
 
-        return state
+            # Contatore multi-frame per il pugno chiuso (evita sfarfallii o glitch mentre disegni)
+            if is_fist:
+                history['fist_confidence_counter'] += 1
+            else:
+                # Diminuisci gradualmente in caso di perdita frame temporanea
+                history['fist_confidence_counter'] = max(0, history['fist_confidence_counter'] - 1)
+
+            # Trigger del cambio colore solo se il pugno è stabile per ~5 frame e fuori cooldown
+            if history['fist_confidence_counter'] >= 5 and (time.time() - history['last_fist_time'] > 1.0):
+                state.fist_closed = True
+                history['last_fist_time'] = time.time()
+                history['fist_confidence_counter'] = 0  # Resetta per limitare trigger multipli
+
+            if is_middle:
+                state.easter_egg = True
+                mid = landmarks[MIDDLE_TIP]
+                sm_x, sm_y = self._smooth_point(mid.x, mid.y, history)
+                state.raw_x, state.raw_y = sm_x, sm_y
+                state.canvas_x, state.canvas_y = self._to_canvas_coords(sm_x, sm_y)
+            elif is_pinching:
+                state.drawing = True
+                thumb, index = landmarks[THUMB_TIP], landmarks[INDEX_TIP]
+                raw_x, raw_y = (thumb.x + index.x) / 2.0, (thumb.y + index.y) / 2.0
+                sm_x, sm_y = self._smooth_point(raw_x, raw_y, history)
+                state.raw_x, state.raw_y = sm_x, sm_y
+                state.canvas_x, state.canvas_y = self._to_canvas_coords(sm_x, sm_y)
+            elif is_precision_erase:
+                state.precision_erasing = True
+                idx_tip = landmarks[INDEX_TIP]
+                sm_x, sm_y = self._smooth_point(idx_tip.x, idx_tip.y, history)
+                state.raw_x, state.raw_y = sm_x, sm_y
+                state.canvas_x, state.canvas_y = self._to_canvas_coords(sm_x, sm_y)
+            else:
+                history['smoothed_pos'] = None
+
+            hand_states.append(state)
+
+        return hand_states
 
     def draw_overlay(self, frame_bgr, state: HandState):
         """Disegna uno scheletro sci-fi professionale della mano."""
@@ -403,18 +370,18 @@ class HandTracker:
                         (sm_x - txt_size[0]//2, sm_y - 30), cv2.FONT_HERSHEY_DUPLEX, 0.7, (255, 0, 255), 2)
             cv2.circle(frame_bgr, (sm_x, sm_y), 30, (255, 0, 255), 3)
             
-        # Draw snap feedback
-        if getattr(self, '_last_snap_time', 0) and time.time() - self._last_snap_time < 0.5:
-            # Effetto flash per lo Snap
-            cv2.putText(frame_bgr, "SNAP!", 
-                        (w//2 - 50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 255, 255), 3)
-
-        elif state.erasing:
-            txt_size = cv2.getTextSize("ERASING", cv2.FONT_HERSHEY_DUPLEX, 1, 2)[0]
-            cx, cy = int(state.landmarks[MIDDLE_MCP][0] * w), int(state.landmarks[MIDDLE_MCP][1] * h)
-            cv2.putText(frame_bgr, "ERASING", 
-                        (cx - txt_size[0]//2, cy), cv2.FONT_HERSHEY_DUPLEX, 1, (0, 0, 255), 2)
-            cv2.circle(frame_bgr, (cx, cy), 60, (0, 0, 255), 4)
+        # Feedback visivo del Pugno Chiuso (Cambio Colore)
+        history = self._get_history(state.hand_label)
+        if time.time() - history['last_fist_time'] < 0.5:
+            cv2.putText(frame_bgr, "COLOR CHANGE!", 
+                        (w//2 - 120, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 0), 3)
+            
+        elif state.precision_erasing:
+            sm_x = int(state.raw_x * w)
+            sm_y = int(state.raw_y * h)
+            cv2.circle(frame_bgr, (sm_x, sm_y), 15, (255, 255, 255), 2)
+            cv2.putText(frame_bgr, "ERASER", 
+                        (sm_x + 20, sm_y - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
 
     def release(self):
         self.detector.close()

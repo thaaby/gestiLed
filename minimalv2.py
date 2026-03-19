@@ -822,8 +822,8 @@ def main():
     print("")
     print("  GESTI:")
     print("  Pinch (indice+pollice) = Disegna")
-    print("  Palmo aperto+swipe orizzontale = Cancella")
-    print("  Schiocco dita (snap) = Cambia colore pennello")
+    print("  Clap (Batti le mani) = Cancella lavagna")
+    print("  Pugno chiuso = Cambia colore pennello")
     print("  Dito Medio = Sorpresa (Easter Egg)")
     print("-" * 50 + "\n")
     
@@ -868,57 +868,86 @@ def main():
             frame = cv2.flip(frame, 1)
             
             # --- 1. HAND TRACKING ---
-            hand_state = tracker.process_frame(frame)
+            hand_states = tracker.process_frame(frame)
             
             # --- 2. AGGIORNA CANVAS IN BASE AI GESTI ---
-            if hand_state.erasing and (time.time() - last_erase_time > ERASE_COOLDOWN):
+            active_ids = {s.hand_label for s in hand_states}
+            
+            # Resetta l'interpolazione per le mani che non sono più rilevate (uscite dall'inquadratura)
+            for hid in list(canvas_esp._hand_states.keys()):
+                if hid not in active_ids:
+                    canvas_esp.draw_at(0, 0, False, hand_id=hid)
+                    if canvas_arduino:
+                        canvas_arduino.draw_at(0, 0, False, hand_id=hid)
+            
+            # Usa il sint per la "Sinfonia" se almeno una mano sta disegnando
+            is_any_drawing = any(s.drawing for s in hand_states)
+            if not is_any_drawing:
+                synth.play_note(0, 0, canvas_esp.width, canvas_esp.height, False)
+
+            # Rilevamento CLAP (Batti le mani per cancellare)
+            is_clapping = False
+            if len(hand_states) == 2:
+                # Polsi (indice 0 in MediaPipe)
+                w1 = hand_states[0].landmarks[0]
+                w2 = hand_states[1].landmarks[0]
+                dist_wrists = math.sqrt((w1[0] - w2[0])**2 + (w1[1] - w2[1])**2)
+                if dist_wrists < 0.25: # mani molto vicine (25% della larghezza schermo)
+                    is_clapping = True
+                    
+            if is_clapping and (time.time() - last_erase_time > ERASE_COOLDOWN):
                 canvas_esp.clear()
                 if canvas_arduino:
                     canvas_arduino.clear()
                 last_erase_time = time.time()
-                print("[CANCELLA] Lavagna cancellata con gesto!")
+                print("[CANCELLA] Lavagna cancellata con CLAP!")
+
+            for hand_state in hand_states:
+                if hand_state.easter_egg and (time.time() - last_easter_egg_time > EASTER_EGG_COOLDOWN):
+                    canvas_esp.draw_easter_egg(hand_state.canvas_x, hand_state.canvas_y)
+                    if canvas_arduino:
+                        ax = int(hand_state.raw_x * ARDUINO_COLS)
+                        ax = ARDUINO_COLS - 1 - max(0, min(ax, ARDUINO_COLS - 1))
+                        ay = int(hand_state.raw_y * ARDUINO_ROWS)
+                        ay = max(0, min(ay, ARDUINO_ROWS - 1))
+                        canvas_arduino.draw_easter_egg(ax, ay)
+                    last_easter_egg_time = time.time()
+                    print("[EASTER EGG] Forma speciale disegnata!")
                 
-            if hand_state.easter_egg and (time.time() - last_easter_egg_time > EASTER_EGG_COOLDOWN):
-                canvas_esp.draw_easter_egg(hand_state.canvas_x, hand_state.canvas_y)
-                if canvas_arduino:
-                    ax = int(hand_state.raw_x * ARDUINO_COLS)
-                    ax = max(0, min(ax, ARDUINO_COLS - 1))
-                    ax = ARDUINO_COLS - 1 - ax
-                    ay = int(hand_state.raw_y * ARDUINO_ROWS)
-                    ay = max(0, min(ay, ARDUINO_ROWS - 1))
-                    canvas_arduino.draw_easter_egg(ax, ay)
-                last_easter_egg_time = time.time()
-                print("[EASTER EGG] Forma speciale disegnata!")
-            
-            if hand_state.snapped:
-                # Cambia colore ciclicamente
-                current_idx = canvas_esp.get_color_index()
-                next_idx = (current_idx + 1) % len(COLOR_PALETTE)
-                canvas_esp.set_color_by_index(next_idx)
-                if canvas_arduino:
-                    canvas_arduino.set_color_by_index(next_idx)
-                print(f"[SNAP] Nuovo colore: {canvas_esp.get_color_name()}")
-                
-            if hand_state.drawing:
-                canvas_esp.draw_at(hand_state.canvas_x, hand_state.canvas_y, True)
-                
-                # Riproduci Sinfonia
-                synth.play_note(hand_state.canvas_x, hand_state.canvas_y, canvas_esp.width, canvas_esp.height, True)
-                
-                # Se c'è un canvas Arduino separato, mappa le coordinate
-                if canvas_arduino:
-                    ax = int(hand_state.raw_x * ARDUINO_COLS)
-                    ax = max(0, min(ax, ARDUINO_COLS - 1))
-                    # Flip X per Arduino (stessa logica del tracker)
-                    ax = ARDUINO_COLS - 1 - ax
-                    ay = int(hand_state.raw_y * ARDUINO_ROWS)
-                    ay = max(0, min(ay, ARDUINO_ROWS - 1))
-                    canvas_arduino.draw_at(ax, ay, True)
-            else:
-                synth.play_note(0, 0, canvas_esp.width, canvas_esp.height, False)
-                canvas_esp.draw_at(0, 0, False)  # Reset interpolazione
-                if canvas_arduino:
-                    canvas_arduino.draw_at(0, 0, False)
+                if hand_state.fist_closed:
+                    current_idx = canvas_esp.get_color_index()
+                    next_idx = (current_idx + 1) % len(COLOR_PALETTE)
+                    canvas_esp.set_color_by_index(next_idx)
+                    if canvas_arduino:
+                        canvas_arduino.set_color_by_index(next_idx)
+                    print(f"[PUGNO] Nuovo colore: {canvas_esp.get_color_name()}")
+                    
+                if hand_state.drawing:
+                    canvas_esp.draw_at(hand_state.canvas_x, hand_state.canvas_y, True, hand_id=hand_state.hand_label, is_erasing=False)
+                    # Riproduciamo la nota usando le coordinate della mano che sta disegnando
+                    synth.play_note(hand_state.canvas_x, hand_state.canvas_y, canvas_esp.width, canvas_esp.height, True)
+                    
+                    if canvas_arduino:
+                        ax = int(hand_state.raw_x * ARDUINO_COLS)
+                        ax = ARDUINO_COLS - 1 - max(0, min(ax, ARDUINO_COLS - 1))
+                        ay = int(hand_state.raw_y * ARDUINO_ROWS)
+                        ay = max(0, min(ay, ARDUINO_ROWS - 1))
+                        canvas_arduino.draw_at(ax, ay, True, hand_id=hand_state.hand_label, is_erasing=False)
+                        
+                elif hand_state.precision_erasing:
+                    # Gesto Cancellino di precisione (Solo dito Indice puntato)
+                    canvas_esp.draw_at(hand_state.canvas_x, hand_state.canvas_y, True, hand_id=hand_state.hand_label, is_erasing=True)
+                    if canvas_arduino:
+                        ax = int(hand_state.raw_x * ARDUINO_COLS)
+                        ax = ARDUINO_COLS - 1 - max(0, min(ax, ARDUINO_COLS - 1))
+                        ay = int(hand_state.raw_y * ARDUINO_ROWS)
+                        ay = max(0, min(ay, ARDUINO_ROWS - 1))
+                        canvas_arduino.draw_at(ax, ay, True, hand_id=hand_state.hand_label, is_erasing=True)
+                        
+                else:
+                    canvas_esp.draw_at(0, 0, False, hand_id=hand_state.hand_label)
+                    if canvas_arduino:
+                        canvas_arduino.draw_at(0, 0, False, hand_id=hand_state.hand_label)
             
             # --- 3. PREPARA FRAME RGB DAL CANVAS ---
             frame_rgb = canvas_esp.get_frame_rgb()
@@ -994,7 +1023,8 @@ def main():
             # --- 6. VISUALIZZAZIONE ---
             # Finestra webcam con overlay mani
             frame_preview = frame.copy()
-            tracker.draw_overlay(frame_preview, hand_state)
+            for hand_state in hand_states:
+                tracker.draw_overlay(frame_preview, hand_state)
             
             # Info colore e pennello sull'overlay webcam
             color_bgr = tuple(int(c) for c in canvas_esp.current_color[::-1])  # RGB → BGR
@@ -1011,10 +1041,17 @@ def main():
             cv2.imshow('Lavagna LED - Webcam', frame_preview)
             
             # Finestra canvas (anteprima LED ingrandita in proporzione)
+            # Mostriamo il mirino solo per la prima mano che sta disegnando (se ce n'è una)
+            cursor_x, cursor_y = -1, -1
+            for h in hand_states:
+                if h.detected:
+                    cursor_x, cursor_y = h.canvas_x, h.canvas_y
+                    break
+                    
             canvas_preview = canvas_esp.get_preview(
                 scale=15, 
-                cursor_x=hand_state.canvas_x if (hand_state.detected and not hand_state.erasing) else -1, 
-                cursor_y=hand_state.canvas_y if (hand_state.detected and not hand_state.erasing) else -1
+                cursor_x=cursor_x, 
+                cursor_y=cursor_y
             )
             cv2.imshow('Lavagna LED - Canvas', canvas_preview)
 

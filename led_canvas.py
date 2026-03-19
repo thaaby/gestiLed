@@ -51,10 +51,9 @@ class LEDCanvas:
         # Dimensione pennello (1 = singolo pixel, 2 = 2x2, 3 = 3x3)
         self.brush_size = 1
 
-        # Ultima posizione disegnata (per interpolazione Bresenham)
-        self._last_x: int = -1
-        self._last_y: int = -1
-        self._was_drawing: bool = False
+        # Traccia l'ultima posizione di ogni mano per l'interpolazione
+        # Formato: { hand_id: {'x': -1, 'y': -1, 'was_drawing': False} }
+        self._hand_states = {}
 
     def set_color_by_index(self, index: int):
         """Imposta il colore corrente dalla palette (indice 0-8).
@@ -82,23 +81,24 @@ class LEDCanvas:
         """
         self.brush_size = max(1, min(3, size))
 
-    def _paint_pixel(self, x: int, y: int):
+    def _paint_pixel(self, x: int, y: int, color: tuple):
         """Colora un pixel (o un blocco, in base al brush_size).
 
         Args:
             x: Coordinata X
             y: Coordinata Y
+            color: Colore da usare (es. nero per cancellare)
         """
         if self.brush_size == 1:
             if 0 <= x < self.width and 0 <= y < self.height:
-                self.pixels[y, x] = self.current_color
+                self.pixels[y, x] = color
         else:
             half = self.brush_size // 2
             for dy in range(-half, half + 1):
                 for dx in range(-half, half + 1):
                     nx, ny = x + dx, y + dy
                     if 0 <= nx < self.width and 0 <= ny < self.height:
-                        self.pixels[ny, nx] = self.current_color
+                        self.pixels[ny, nx] = color
 
     def draw_easter_egg(self, cx: int, cy: int):
         """Disegna una forma interattiva speciale (easter egg) centrata in (cx, cy)."""
@@ -116,9 +116,9 @@ class LEDCanvas:
         self._last_x = -1
         self._last_y = -1
 
-    def _bresenham_line(self, x0: int, y0: int, x1: int, y1: int):
+    def _bresenham_line(self, x0: int, y0: int, x1: int, y1: int, color: tuple):
         """Algoritmo di Bresenham per tracciare una linea tra due punti.
-        Dipinge ogni pixel lungo la linea.
+        Dipinge ogni pixel lungo la linea in base al brush_size.
         """
         dx = abs(x1 - x0)
         dy = abs(y1 - y0)
@@ -127,7 +127,7 @@ class LEDCanvas:
         err = dx - dy
 
         while True:
-            self._paint_pixel(x0, y0)
+            self._paint_pixel(x0, y0, color)
             if x0 == x1 and y0 == y1:
                 break
             e2 = 2 * err
@@ -138,41 +138,48 @@ class LEDCanvas:
                 err += dx
                 y0 += sy
 
-    def draw_at(self, x: int, y: int, is_drawing: bool):
-        """Disegna sulla posizione indicata, con interpolazione.
+    def draw_at(self, x: int, y: int, is_drawing: bool, hand_id: str = "default", is_erasing: bool = False):
+        """Disegna (o cancella) sulla posizione indicata, con interpolazione.
 
-        Chiamato ogni frame. Se il frame precedente era anch'esso in disegno,
-        interpola una linea tra le due posizioni per evitare tratti spezzati.
+        Chiamato ogni frame da mani multiple. Usa l'interpolazione (Bresenham)
+        se il tratto era in corso.
 
         Args:
             x: Coordinata X sul canvas
             y: Coordinata Y sul canvas
-            is_drawing: True se il gesto di disegno è attivo
+            is_drawing: True se l'azione (disegnare o cancellare) è attiva
+            hand_id: Identificatore della mano ("Left_0", "Right_1")
+            is_erasing: Se True, dipinge di nero (Precision Eraser)
         """
+        if hand_id not in self._hand_states:
+            self._hand_states[hand_id] = {'x': -1, 'y': -1, 'was_drawing': False}
+            
+        state = self._hand_states[hand_id]
+
         if not is_drawing:
-            # Il dito non sta disegnando — reset stato
-            self._was_drawing = False
-            self._last_x = -1
-            self._last_y = -1
+            # Il dito non sta agendo — reset stato
+            state['was_drawing'] = False
+            state['x'] = -1
+            state['y'] = -1
             return
 
-        if self._was_drawing and self._last_x >= 0 and self._last_y >= 0:
+        color = (0, 0, 0) if is_erasing else self.current_color
+
+        if state['was_drawing'] and state['x'] >= 0 and state['y'] >= 0:
             # Interpola una linea dall'ultima posizione a quella nuova
-            self._bresenham_line(self._last_x, self._last_y, x, y)
+            self._bresenham_line(state['x'], state['y'], x, y, color)
         else:
             # Primo punto di un nuovo tratto
-            self._paint_pixel(x, y)
+            self._paint_pixel(x, y, color)
 
-        self._last_x = x
-        self._last_y = y
-        self._was_drawing = True
+        state['x'] = x
+        state['y'] = y
+        state['was_drawing'] = True
 
     def clear(self):
         """Cancella l'intero canvas (tutti i LED spenti)."""
         self.pixels[:] = 0
-        self._was_drawing = False
-        self._last_x = -1
-        self._last_y = -1
+        self._hand_states.clear()
 
     def get_frame_rgb(self) -> np.ndarray:
         """Restituisce il canvas come array numpy RGB (height, width, 3).

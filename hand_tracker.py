@@ -52,7 +52,7 @@ class HandState:
     """Stato della mano rilevata in un singolo frame."""
     detected: bool = False
     drawing: bool = False
-    fist_closed: bool = False
+    peace_sign: bool = False
     precision_erasing: bool = False
     thumbs_down: bool = False   # Pollice in giù = cancella tutto
     canvas_x: int = -1
@@ -98,8 +98,8 @@ class HandTracker:
     MODEL_FILENAME = "hand_landmarker.task"
 
     def __init__(self, canvas_width: int, canvas_height: int,
-                 min_detection_confidence: float = 0.6,
-                 min_tracking_confidence: float = 0.5):
+                 min_detection_confidence: float = 0.4,
+                 min_tracking_confidence: float = 0.4):
         self.canvas_width = canvas_width
         self.canvas_height = canvas_height
 
@@ -135,8 +135,8 @@ class HandTracker:
                 'was_drawing': False,
                 'drawing_grace_counter': 0,
                 'smoothed_pos': None,
-                'last_fist_time': 0.0,
-                'fist_confidence_counter': 0,
+                'last_peace_time': 0.0,
+                'peace_confidence_counter': 0,
                 'eraser_confidence_counter': 0,
                 'was_erasing': False,
                 'frames_since_drawing': 999,  # grande = non stava disegnando
@@ -267,30 +267,20 @@ class HandTracker:
 
         return False
 
-    def _detect_fist(self, landmarks) -> bool:
-        """Rileva se tutte e 4 le dita principali sono piegate verso il palmo in modo molto serrato (Pugno 100%)."""
+    def _detect_peace_sign(self, landmarks) -> bool:
+        """Rileva il segno della pace confrontando direttamente l'estensione delle dita."""
+        index_up = self._is_finger_extended(landmarks, INDEX_TIP, INDEX_PIP)
+        middle_up = self._is_finger_extended(landmarks, MIDDLE_TIP, MIDDLE_PIP)
         
-        def is_tightly_curled(tip_idx, pip_idx, mcp_idx):
-            dist_tip = self._distance2d(landmarks[WRIST], landmarks[tip_idx])
-            dist_pip = self._distance2d(landmarks[WRIST], landmarks[pip_idx])
-            dist_mcp = self._distance2d(landmarks[WRIST], landmarks[mcp_idx])
-            
-            # Un vero pugno ha la punta del dito ripiegata all'interno. Quindi la punta 
-            # sarà molto più vicina al polso rispetto alla nocca media (PIP), ed a una distanza
-            # paragonabile a quella della nocca base (MCP).
-            return (dist_tip < dist_pip * 0.85) and (dist_tip < dist_mcp * 1.35)
-
-        index_curled = is_tightly_curled(INDEX_TIP, INDEX_PIP, INDEX_MCP)
-        middle_curled = is_tightly_curled(MIDDLE_TIP, MIDDLE_PIP, MIDDLE_MCP)
-        ring_curled = is_tightly_curled(RING_TIP, RING_PIP, RING_MCP)
-        pinky_curled = is_tightly_curled(PINKY_TIP, PINKY_PIP, PINKY_MCP)
+        dist_index = self._distance2d(landmarks[WRIST], landmarks[INDEX_TIP])
+        dist_middle = self._distance2d(landmarks[WRIST], landmarks[MIDDLE_TIP])
+        dist_ring = self._distance2d(landmarks[WRIST], landmarks[RING_TIP])
+        dist_pinky = self._distance2d(landmarks[WRIST], landmarks[PINKY_TIP])
         
-        # Aggiungiamo il pollice piegato per una sicurezza assoluta al 99.9%
-        thumb_tip = self._distance2d(landmarks[WRIST], landmarks[THUMB_TIP])
-        thumb_ip = self._distance2d(landmarks[WRIST], landmarks[THUMB_IP])
-        thumb_curled = thumb_tip < thumb_ip * 1.15
-
-        return index_curled and middle_curled and ring_curled and pinky_curled and thumb_curled
+        # Per la pace, Indice e Medio devono essere molto più lontani dal polso rispetto ad Anulare e Mignolo
+        is_v_shape = (dist_index > dist_ring * 1.25) and (dist_middle > dist_pinky * 1.25)
+        
+        return index_up and middle_up and is_v_shape
 
     def _smooth_point(self, new_x: float, new_y: float, history: dict) -> tuple:
         """Filtro esponenziale per azzerare il tremolio (Jitter)."""
@@ -375,20 +365,20 @@ class HandTracker:
             # BUG-4 FIX: eraser con isteresi multi-frame
             is_precision_erase = self._detect_precision_eraser(landmarks, history)
             is_thumbs_down = self._detect_thumbs_down(landmarks, history)
-            is_fist = self._detect_fist(landmarks)
+            is_peace = self._detect_peace_sign(landmarks)
 
-            # Contatore multi-frame per il pugno chiuso (evita sfarfallii o glitch mentre disegni)
-            if is_fist:
-                history['fist_confidence_counter'] += 1
+            # Contatore multi-frame per il segno della pace (evita sfarfallii o glitch mentre disegni)
+            if is_peace:
+                history['peace_confidence_counter'] += 1
             else:
                 # Diminuisci gradualmente in caso di perdita frame temporanea
-                history['fist_confidence_counter'] = max(0, history['fist_confidence_counter'] - 1)
+                history['peace_confidence_counter'] = max(0, history['peace_confidence_counter'] - 1)
 
-            # Trigger del cambio colore solo se il pugno è stabile per ~5 frame e fuori cooldown
-            if history['fist_confidence_counter'] >= 5 and (time.time() - history['last_fist_time'] > 1.0):
-                state.fist_closed = True
-                history['last_fist_time'] = time.time()
-                history['fist_confidence_counter'] = 0  # Resetta per limitare trigger multipli
+            # Trigger del cambio colore solo se il gesto è stabile per ~5 frame e fuori cooldown
+            if history['peace_confidence_counter'] >= 5 and (time.time() - history['last_peace_time'] > 1.0):
+                state.peace_sign = True
+                history['last_peace_time'] = time.time()
+                history['peace_confidence_counter'] = 0  # Resetta per limitare trigger multipli
 
             # Thumbs down → cancella tutto
             if is_thumbs_down:
@@ -478,9 +468,9 @@ class HandTracker:
             cv2.putText(frame_bgr, f"REC [{state.canvas_x},{state.canvas_y}]", 
                         (sm_x + 20, sm_y - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
             
-        # Feedback visivo del Pugno Chiuso (Cambio Colore)
+        # Feedback visivo del Segno della Pace (Cambio Colore)
         history = self._get_history(state.hand_label)
-        if time.time() - history['last_fist_time'] < 0.5:
+        if time.time() - history['last_peace_time'] < 0.5:
             cv2.putText(frame_bgr, "COLOR CHANGE!", 
                         (w//2 - 120, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 0), 3)
             

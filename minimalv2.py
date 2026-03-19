@@ -829,9 +829,7 @@ def main():
     print("  [Q/ESC] - Esci")
     print("")
     print("  GESTI:")
-    print("  Pinch (indice+pollice) = Disegna")
-    print("  Pollice in giù = Cancella lavagna")
-    print("  Pugno chiuso = Cambia colore pennello")
+    print("  Pinch (indice+pollice) = Disegna\n  Pollice in giù = Cancella lavagna\n  Segno della pace (V) = Cambia colore pennello")
     print("-" * 50 + "\n")
     
     # --- CONNESSIONI ---
@@ -903,11 +901,11 @@ def main():
                     print("[CANCELLA] Lavagna cancellata con POLLICE IN GIÙ! 👎")
 
             for hand_state in hand_states:
-                if hand_state.fist_closed:
+                if hand_state.peace_sign:
                     current_idx = canvas_led.get_color_index()
                     next_idx = (current_idx + 1) % len(COLOR_PALETTE)
                     canvas_led.set_color_by_index(next_idx)
-                    print(f"[PUGNO] Nuovo colore: {canvas_led.get_color_name()}")
+                    print(f"[PACE] Nuovo colore: {canvas_led.get_color_name()}")
                     
                 if hand_state.drawing:
                     canvas_led.draw_at(hand_state.canvas_x, hand_state.canvas_y, True, hand_id=hand_state.hand_label, is_erasing=False)

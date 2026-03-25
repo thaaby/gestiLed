@@ -8,6 +8,7 @@ import sys
 from datetime import datetime
 import socket
 import glob
+import subprocess
 from hand_tracker import HandTracker, HandState
 from led_canvas import LEDCanvas, COLOR_PALETTE, COLOR_NAMES_IT
 from audio_synth import AudioSynth
@@ -213,7 +214,7 @@ COLOR_DATABASE = [
 # ============================================================
 # CONFIGURAZIONE MAXISCHERMO ESP (MULTI-PANNELLO UDP)
 # ============================================================
-ESP_ENABLED = True
+ESP_ENABLED = "auto"  # "auto" = rileva automaticamente, True = forza ON, False = forza OFF
 ESP_IPS = ["192.168.1.61", "192.168.1.62", "192.168.1.63", "192.168.1.64", "192.168.1.65", "192.168.1.68"]
 ESP_PORT = 4210
 
@@ -229,7 +230,7 @@ ESP_START_BOTTOM = False  # False = in alto a sx. True = in basso a sx.
 # ============================================================
 # CONFIGURAZIONE ARDUINO VIDEO (SERIALE)
 # ============================================================
-ARDUINO_ENABLED = True
+ARDUINO_ENABLED = "auto"  # "auto" = rileva automaticamente, True = forza ON, False = forza OFF
 ARDUINO_PORT = "auto"
 ARDUINO_BAUD = 500000
 ARDUINO_ROWS = 32
@@ -239,9 +240,9 @@ ARDUINO_PANEL_H = 32
 ARDUINO_PANELS_COUNT = 4
 ARDUINO_MIRROR_HORIZONTAL = True
 
-# LA RISOLUZIONE PRINCIPALE DELLA LAVAGNA
-LOGICAL_WIDTH = TOTAL_WIDTH if ESP_ENABLED else ARDUINO_COLS
-LOGICAL_HEIGHT = PANEL_HEIGHT if ESP_ENABLED else ARDUINO_ROWS
+# LA RISOLUZIONE PRINCIPALE DELLA LAVAGNA (calcolata in detect_hardware())
+LOGICAL_WIDTH = ARDUINO_COLS  # default, ricalcolato al boot
+LOGICAL_HEIGHT = ARDUINO_ROWS
 
 ARDUINO_PANEL_ORDER = [3, 2, 1, 0]
 ARDUINO_PANEL_START_BOTTOM = [False, False, False, False]
@@ -255,6 +256,73 @@ gamma_table = np.array([((i / 255.0) ** GAMMA) * 255
 
 # Header a 3 byte condiviso tra invio e shutdown
 MAGIC_HEADER = b'\xFFLE'  # 0xFF 0x4C 0x45
+
+
+# ============================================================
+# AUTO-RILEVAMENTO HARDWARE
+# ============================================================
+
+def _ping_host(ip, timeout_ms=500):
+    """Quick ping per verificare se un host è raggiungibile."""
+    try:
+        result = subprocess.run(
+            ['ping', '-c', '1', '-W', str(timeout_ms), ip],
+            capture_output=True, timeout=2
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+def detect_hardware():
+    """Rileva automaticamente quali dispositivi LED sono collegati."""
+    global ESP_ENABLED, ARDUINO_ENABLED, LOGICAL_WIDTH, LOGICAL_HEIGHT
+
+    print("\n[SCAN] Rilevamento hardware automatico...")
+
+    # --- Arduino: cerca porte seriali USB ---
+    if ARDUINO_ENABLED == "auto":
+        porte = (
+            glob.glob('/dev/ttyUSB*') +
+            glob.glob('/dev/ttyACM*') +
+            glob.glob('/dev/cu.usbmodem*') +
+            glob.glob('/dev/cu.usbserial*')
+        )
+        ARDUINO_ENABLED = len(porte) > 0
+        if ARDUINO_ENABLED:
+            print(f"  [✓] Arduino: porta trovata ({porte[0]})")
+        else:
+            print("  [✗] Arduino: nessuna porta seriale USB")
+
+    # --- ESP: ping del primo pannello ---
+    if ESP_ENABLED == "auto":
+        print(f"  [?] ESP LED Wall: ping {ESP_IPS[0]}...", end=" ", flush=True)
+        ESP_ENABLED = _ping_host(ESP_IPS[0])
+        if ESP_ENABLED:
+            print(f"raggiungibile! ({len(ESP_IPS)} pannelli)")
+        else:
+            print("non raggiungibile")
+
+    # --- Calcola dimensioni logiche ---
+    if ESP_ENABLED:
+        LOGICAL_WIDTH = TOTAL_WIDTH
+        LOGICAL_HEIGHT = PANEL_HEIGHT
+    else:
+        LOGICAL_WIDTH = ARDUINO_COLS
+        LOGICAL_HEIGHT = ARDUINO_ROWS
+
+    # --- Riepilogo ---
+    if ESP_ENABLED and ARDUINO_ENABLED:
+        mode = f"DUAL — ESP ({TOTAL_WIDTH}x{PANEL_HEIGHT}) + Arduino ({ARDUINO_COLS}x{ARDUINO_ROWS})"
+    elif ESP_ENABLED:
+        mode = f"SOLO ESP — {TOTAL_WIDTH}x{PANEL_HEIGHT}"
+    elif ARDUINO_ENABLED:
+        mode = f"SOLO ARDUINO — {ARDUINO_COLS}x{ARDUINO_ROWS}"
+    else:
+        mode = "NESSUN DISPOSITIVO — Solo preview"
+
+    print(f"\n  ► MODALITÀ: {mode}")
+    print(f"  ► Canvas: {LOGICAL_WIDTH}x{LOGICAL_HEIGHT}")
 
 
 def apply_gamma(color):
@@ -672,10 +740,12 @@ def main():
     print("\n" + "=" * 50)
     print("  LAVAGNA LED INTERATTIVA")
     print("  Disegna con le mani sui pannelli LED!")
-    print(f"  Arduino: {ARDUINO_COLS}x{ARDUINO_ROWS} video seriale")
     print("=" * 50)
 
-    # ── FIX 1: seleziona camera PRIMA di aprirla ──
+    # ── AUTO-RILEVAMENTO HARDWARE ──
+    detect_hardware()
+
+    # ── Seleziona camera ──
     camera_id = select_camera()
 
     print(f"\n[CAM] Avvio webcam {camera_id}...")

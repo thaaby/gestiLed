@@ -231,7 +231,7 @@ ESP_START_BOTTOM = False  # False = in alto a sx. True = in basso a sx.
 # ============================================================
 ARDUINO_ENABLED = True
 ARDUINO_PORT = "auto"
-ARDUINO_BAUD = 2000000
+ARDUINO_BAUD = 500000
 ARDUINO_ROWS = 32
 ARDUINO_COLS = 32
 ARDUINO_PANEL_W = 8

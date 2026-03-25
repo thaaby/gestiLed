@@ -48,7 +48,7 @@ int bufferPos = 0;
 
 void setup() {
   Serial.begin(500000);
-  Serial.setTimeout(200);  // Timeout: 3072 byte @ 500kbaud = ~55ms, usiamo 200ms con margine
+  Serial.setTimeout(500);  // Timeout: 3072 byte @ 500kbaud = ~55ms, usiamo 500ms con margine
   pinMode(13, OUTPUT);
   
   FastLED.addLeds<LED_TYPE, LED_PIN, COLOR_ORDER>(leds, NUM_LEDS).setCorrection(TypicalLEDStrip);

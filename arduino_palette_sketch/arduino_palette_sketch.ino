@@ -48,7 +48,7 @@ int bufferPos = 0;
 
 void setup() {
   Serial.begin(500000);
-  Serial.setTimeout(100);  // Timeout per ricevere frame video completi
+  Serial.setTimeout(200);  // Timeout: 3072 byte @ 500kbaud = ~55ms, usiamo 200ms con margine
   pinMode(13, OUTPUT);
   
   FastLED.addLeds<LED_TYPE, LED_PIN, COLOR_ORDER>(leds, NUM_LEDS).setCorrection(TypicalLEDStrip);
@@ -173,25 +173,33 @@ void parseSingle(char* data) {
 }
 
 void loop() {
-// Flag temporaneo per sapere se il frame è pronto
-  bool videoFrameReady = false;
 
-  // 0. MODALITÀ VIDEO: cerca il byte di sincronizzazione 'V'
-  if (Serial.available() > 0 && Serial.peek() == 'V') {
-    Serial.read(); // Consuma 'V'
+  // 0. MODALITÀ VIDEO: cerca il magic header a 3 byte: 0xFF 0x4C 0x45
+  // NOTA: il vecchio sync 'V' (0x56) poteva comparire nei dati RGB causando caos.
+  // Il nuovo header triplo è praticamente impossibile nei dati pixel reali.
+  if (Serial.available() >= 3 && (uint8_t)Serial.peek() == 0xFF) {
+    uint8_t hdr[3];
+    Serial.readBytes((char*)hdr, 3);
     
-    // Attendi i dati RGB del frame
-    int bytesRead = Serial.readBytes((char*)leds, NUM_LEDS * 3);
-    
-    if (bytesRead == NUM_LEDS * 3) {
-      digitalWrite(13, HIGH); // LED acceso: frame video OK
-      FastLED.show();
-    } else {
-      digitalWrite(13, LOW);  // LED spento: frame incompleto o perso
-      // Frame corrotto o frammentato, svuota il buffer per risincronizzare
-      while(Serial.available() > 0) Serial.read();
+    if (hdr[0] == 0xFF && hdr[1] == 0x4C && hdr[2] == 0x45) {
+      // Magic header valido: leggi i 3072 byte del frame
+      int bytesRead = Serial.readBytes((char*)leds, NUM_LEDS * 3);
+      
+      if (bytesRead == NUM_LEDS * 3) {
+        digitalWrite(13, HIGH); // LED acceso: frame video OK
+        FastLED.show();
+        Serial.write('K'); // ACK: conferma ricezione frame a Python
+      } else {
+        digitalWrite(13, LOW);  // Frame incompleto
+        // Flush del buffer per risincronizzare
+        while(Serial.available() > 0) Serial.read();
+      }
+      return; // Ricomincia il loop
     }
-    return; // Completato o ignorato il frame video, ricomincia il loop
+    // Header falso (0xFF senza seguito corretto): scarta i 3 byte e continua
+  } else if (Serial.available() > 0 && (uint8_t)Serial.peek() == 0xFF) {
+    // 0xFF senza abbastanza byte ancora arrivati: aspetta il prossimo loop
+    return;
   }
   
   // 1. LEGGI seriale (modalità palette/colore singolo)

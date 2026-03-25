@@ -1,3 +1,5 @@
+
+
 import cv2
 import numpy as np
 from collections import namedtuple, deque
@@ -8,9 +10,6 @@ import sys
 from datetime import datetime
 import socket
 import glob
-from hand_tracker import HandTracker, HandState
-from led_canvas import LEDCanvas, COLOR_PALETTE, COLOR_NAMES_IT
-from audio_synth import AudioSynth
 try:
     import serial
     HAS_SERIAL = True
@@ -213,57 +212,49 @@ COLOR_DATABASE = [
 # ============================================================
 # CONFIGURAZIONE MAXISCHERMO ESP (MULTI-PANNELLO UDP)
 # ============================================================
-ESP_ENABLED = True
-ESP_IPS = ["192.168.1.61", "192.168.1.62", "192.168.1.63", "192.168.1.64", "192.168.1.65", "192.168.1.68"]
+# IP dei 3 ESP (da sinistra a destra)
+ESP_IPS = ["192.168.1.61", "192.168.1.62", "192.168.1.63", "192.168.1.64", "192.168.1.65", "192.168.1.68",]
 ESP_PORT = 4210
 
 # Dimensioni di ogni singolo pannello LED ESP
 PANEL_WIDTH = 15
 PANEL_HEIGHT = 44
-TOTAL_WIDTH = PANEL_WIDTH * len(ESP_IPS)
-
-# Orientamento e serpentina ESP
-ESP_SERPENTINE_HORIZONTAL = True
-ESP_START_BOTTOM = False  # False = in alto a sx. True = in basso a sx.
+TOTAL_WIDTH = PANEL_WIDTH * len(ESP_IPS)  # Larghezza totale del ledwall
 
 # ============================================================
 # CONFIGURAZIONE ARDUINO VIDEO (SERIALE)
 # ============================================================
-ARDUINO_ENABLED = True
-ARDUINO_PORT = "auto"
-ARDUINO_BAUD = 2000000
-ARDUINO_ROWS = 32
-ARDUINO_COLS = 32
-ARDUINO_PANEL_W = 8
-ARDUINO_PANEL_H = 32
-ARDUINO_PANELS_COUNT = 4
-ARDUINO_MIRROR_HORIZONTAL = True
+ARDUINO_ENABLED = True            # Abilita streaming video via seriale
+ARDUINO_PORT = "auto"             # Porta seriale ('auto' per rilevamento automatico)
+ARDUINO_BAUD = 500000             # Deve corrispondere al baud rate dello sketch
+ARDUINO_ROWS = 32                 # 4 pannelli impilati × 8 righe ciascuno
+ARDUINO_COLS = 32                 # Larghezza di un pannello
+# Configurazione Orientamento Pannelli Arduino
+ARDUINO_PANEL_W = 8               # Larghezza di un singolo pannello fisico
+ARDUINO_PANEL_H = 32              # Altezza di un singolo pannello fisico
+ARDUINO_PANELS_COUNT = 4          # Quanti pannelli ci sono
 
-# LA RISOLUZIONE PRINCIPALE DELLA LAVAGNA
-LOGICAL_WIDTH = TOTAL_WIDTH if ESP_ENABLED else ARDUINO_COLS
-LOGICAL_HEIGHT = PANEL_HEIGHT if ESP_ENABLED else ARDUINO_ROWS
+# Configurazione cablaggio ricavata dalla foto del retro:
+# Pannello 0 (destra): entra da sotto, esce da sopra
+# Pannello 1 (centro-dx): entra da sopra, esce da sotto
+# Pannello 2 (centro-sx): entra da sotto, esce da sopra
+# L'utente ha confermato che l'ordine fisico va invertito
+ARDUINO_PANEL_ORDER = [0, 1, 2, 3]  # Era [3, 2, 1, 0]
+ARDUINO_PANEL_START_BOTTOM = [False, False, False, False] # Il P2 e P4 (indici 1 e 3) rovesciati su richiesta, ora tutto parte da sopra per non vederla sottosopra
+ARDUINO_SERPENTINE_X = True         # Zigzag orizzontale dentro il pannello
 
-ARDUINO_PANEL_ORDER = [0, 1, 2, 3]
-ARDUINO_PANEL_START_BOTTOM = [False, False, False, False]
-ARDUINO_SERPENTINE_X = True
+GAMMA = 2.5           
+COMMON_ANODE = False  # Premi [I] per invertire i colori
 
-GAMMA = 2.5
-COMMON_ANODE = False
-
-gamma_table = np.array([((i / 255.0) ** GAMMA) * 255
-                         for i in np.arange(0, 256)]).astype("uint8")
-
-# Header a 3 byte condiviso tra invio e shutdown
-MAGIC_HEADER = b'\xFFLE'  # 0xFF 0x4C 0x45
-
+# Tabella gamma pre-calcolata
+gamma_table = np.array([((i / 255.0) ** GAMMA) * 255 for i in np.arange(0, 256)]).astype("uint8")
 
 def apply_gamma(color):
+    """Applica la correzione gamma al colore RGB"""
     return gamma_table[color]
 
-
 def create_udp_socket():
-    if not ESP_ENABLED:
-        return None
+    """Crea un socket UDP per comunicare con i pannelli ESP."""
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         print(f"[OK] Socket UDP creato -> {len(ESP_IPS)} pannelli sulla porta {ESP_PORT}")
@@ -276,20 +267,23 @@ def create_udp_socket():
 
 
 def create_arduino_serial():
+    """Crea connessione seriale all'Arduino per video streaming.
+    Se ARDUINO_PORT è 'auto', cerca automaticamente la porta."""
     if not ARDUINO_ENABLED or not HAS_SERIAL:
         if not HAS_SERIAL:
             print("[!] pyserial non disponibile. Installa con: pip install pyserial")
         return None
-
+    
     port = ARDUINO_PORT
-
+    
+    # Auto-detect: cerca porte seriali disponibili
     if port == "auto":
         porte_trovate = (
-            glob.glob('/dev/ttyUSB*') +
-            glob.glob('/dev/ttyACM*') +
-            glob.glob('/dev/cu.usbmodem*') +
-            glob.glob('/dev/cu.usbserial*') +
-            glob.glob('/dev/tty.*')
+            glob.glob('/dev/ttyUSB*') + 
+            glob.glob('/dev/ttyACM*') + 
+            glob.glob('/dev/cu.usbmodem*') +   # macOS
+            glob.glob('/dev/cu.usbserial*') +  # macOS
+            glob.glob('/dev/tty.*')            # macOS generico per R4
         )
         if not porte_trovate:
             print("[!] Nessuna porta seriale trovata!")
@@ -297,12 +291,14 @@ def create_arduino_serial():
             return None
         port = porte_trovate[0]
         print(f"[AUTO] Porta seriale rilevata: {port}")
-
+    
     try:
-        ser = serial.Serial(port, ARDUINO_BAUD, timeout=0.01)
-        time.sleep(2)
+        ser = serial.Serial(port, ARDUINO_BAUD, timeout=0.01) # Timeout basso per non bloccare il loop
+        time.sleep(2)  # Attendi reset Arduino
         print(f"[OK] Arduino connesso su {port} @ {ARDUINO_BAUD} baud")
         print(f"     Matrice: {ARDUINO_COLS}x{ARDUINO_ROWS} ({ARDUINO_COLS * ARDUINO_ROWS} LED)")
+        
+        # Test: pulizia buffer in ingresso
         ser.read_all()
         return ser
     except serial.SerialException as e:
@@ -314,37 +310,98 @@ def create_arduino_serial():
 
 
 def map_frame_to_leds(frame_rgb):
+    """Mappa l'immagine 32x32 quadrata nell'ordine fisico dei 4 pannelli LED.
+    
+    In base al cablaggio (foto dal retro): i pannelli formano un serpente gigante.
+    P0 (destra) va dal basso verso l'alto.
+    P1 (centro-dx) va dall'alto verso il basso.
+    P2 (centro-sx) va dal basso verso l'alto.
+    P3 (sinistra) va dall'alto verso il basso.
+    All'interno di ogni riga da 8 led, il segnale sfolla a zigzag.
+    """
     out_buffer = bytearray(ARDUINO_COLS * ARDUINO_ROWS * 3)
     idx = 0
-
+    
+    # Ciclo sui pannelli fisici nell'ordine in cui sono collegati (0, 1, 2, 3)
     for p in range(ARDUINO_PANELS_COUNT):
+        
+        # Qual è l'indice X di partenza nell'immagine totale per questo pannello?
+        # Il pannello 0 è a destra (indice 3 da sinistra), quindi X inizia a 3*8 = 24.
         panel_pos_x = ARDUINO_PANEL_ORDER[p]
         start_x = panel_pos_x * ARDUINO_PANEL_W
+        
+        # Direzione verticale: parte dal basso o dall'alto?
         starts_bottom = ARDUINO_PANEL_START_BOTTOM[p]
-
+        
+        # Iteriamo su ciascun LED (32 righe x 8 colonne) = 256 pixel
+        # "y_local" è la riga FISICA del pannello (0 = l'ingresso, 31 = l'uscita)
         for y_local in range(ARDUINO_PANEL_H):
+            
+            # Calcola la Y globale dell'immagine
             if starts_bottom:
+                # Se parte dal basso, entry point è Y=31. Man mano che y_local cresce, saliamo verso Y=0
                 global_y = (ARDUINO_PANEL_H - 1) - y_local
             else:
+                # Se parte dall'alto, entry point è Y=0. Man mano che y_local cresce, scendiamo verso Y=31
                 global_y = y_local
-
+                
+            # Calcola la X
             for x_local in range(ARDUINO_PANEL_W):
+                
                 eff_x = x_local
+                # Serpentine X locale:
+                # Di solito se si parte dal basso e si fa zigzag, la prima riga (y_local=0) va in una direzione,
+                # la seconda (y_local=1) torna indietro.
                 if ARDUINO_SERPENTINE_X and (y_local % 2 == 1):
                     eff_x = (ARDUINO_PANEL_W - 1) - x_local
-
+                
+                # Attenzione: se il segnale entra in basso a *destra* o in basso a *sinistra* cambia.
+                # Assumiamo che il Data In locale sia sempre a sinistra (0) se non zigzagato.
+                # Se l'immagine risulta specchiata all'interno del pannello, basta ribaltare:
+                # eff_x = (ARDUINO_PANEL_W - 1) - eff_x
+                
                 global_x = start_x + eff_x
+                
                 pixel = frame_rgb[global_y, global_x]
-
-                out_buffer[idx]     = pixel[0]
-                out_buffer[idx + 1] = pixel[1]
-                out_buffer[idx + 2] = pixel[2]
+                
+                out_buffer[idx]   = pixel[0]
+                out_buffer[idx+1] = pixel[1]
+                out_buffer[idx+2] = pixel[2]
                 idx += 3
-
+                
     return bytes(out_buffer)
 
 
+def send_arduino_frame(ser, frame, use_gamma=True):
+    """Invia un frame webcam all'Arduino come pixel RGB grezzi.
+    
+    1. Ridimensiona il frame a ARDUINO_COLS × ARDUINO_ROWS
+    2. Converte BGR → RGB
+    3. Applica gamma (opzionale)
+    4. Rimappa serpentina
+    5. Invia: byte 'V' + 3072 byte RGB
+    """
+    # Ridimensiona alla risoluzione della matrice LED
+    small = cv2.resize(frame, (ARDUINO_COLS, ARDUINO_ROWS), interpolation=cv2.INTER_AREA)
+    rgb = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
+    
+    # Correggi gamma
+    if use_gamma:
+        rgb = gamma_table[rgb]
+    
+    # Inverti se Common Anode
+    if COMMON_ANODE:
+        rgb = 255 - rgb
+    
+    # Applica mappatura fisica complessa
+    rgb_bytes = map_frame_to_leds(rgb)
+    
+    # Invia: header 'V' + dati RGB mappati
+    ser.write(b'V' + rgb_bytes)
+
+
 def niente(x):
+    """Callback vuota per lo slider di OpenCV."""
     pass
 
 
@@ -353,98 +410,110 @@ def niente(x):
 # ============================================================
 
 def rgb_to_lab(rgb):
+    """Converte RGB in spazio colore CIE LAB."""
     r, g, b = [x / 255.0 for x in rgb]
-
+    
     def linearize(c):
         return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
-
+    
     r, g, b = linearize(r), linearize(g), linearize(b)
-
+    
     x = r * 0.4124564 + g * 0.3575761 + b * 0.1804375
     y = r * 0.2126729 + g * 0.7151522 + b * 0.0721750
     z = r * 0.0193339 + g * 0.1191920 + b * 0.9503041
-
+    
     x, y, z = x / 0.95047, y / 1.0, z / 1.08883
-
+    
     def f(t):
-        return t ** (1 / 3) if t > 0.008856 else (7.787 * t + 16 / 116)
-
+        return t ** (1/3) if t > 0.008856 else (7.787 * t + 16/116)
+    
     L = 116 * f(y) - 16
     a = 500 * (f(x) - f(y))
     b_val = 200 * (f(y) - f(z))
-
+    
     return (L, a, b_val)
 
 
 def delta_e_cie2000(lab1, lab2):
+    """Distanza Delta-E CIE2000."""
     L1, a1, b1 = lab1
     L2, a2, b2 = lab2
+    
     kL, kC, kH = 1.0, 1.0, 1.0
-
+    
     C1 = np.sqrt(a1**2 + b1**2)
     C2 = np.sqrt(a2**2 + b2**2)
     C_avg = (C1 + C2) / 2
+    
     G = 0.5 * (1 - np.sqrt(C_avg**7 / (C_avg**7 + 25**7)))
-
+    
     a1_prime = a1 * (1 + G)
     a2_prime = a2 * (1 + G)
+    
     C1_prime = np.sqrt(a1_prime**2 + b1**2)
     C2_prime = np.sqrt(a2_prime**2 + b2**2)
-
+    
     h1_prime = np.degrees(np.arctan2(b1, a1_prime)) % 360
     h2_prime = np.degrees(np.arctan2(b2, a2_prime)) % 360
-
+    
     delta_L_prime = L2 - L1
     delta_C_prime = C2_prime - C1_prime
-
+    
     delta_h_prime = h2_prime - h1_prime
     if abs(delta_h_prime) > 180:
         delta_h_prime -= 360 * np.sign(delta_h_prime)
-
+    
     delta_H_prime = 2 * np.sqrt(C1_prime * C2_prime) * np.sin(np.radians(delta_h_prime / 2))
-
+    
     L_avg_prime = (L1 + L2) / 2
     C_avg_prime = (C1_prime + C2_prime) / 2
-
+    
     h_avg_prime = (h1_prime + h2_prime) / 2
     if abs(h1_prime - h2_prime) > 180:
         h_avg_prime += 180
-
+    
     T = (1 - 0.17 * np.cos(np.radians(h_avg_prime - 30)) +
          0.24 * np.cos(np.radians(2 * h_avg_prime)) +
          0.32 * np.cos(np.radians(3 * h_avg_prime + 6)) -
          0.20 * np.cos(np.radians(4 * h_avg_prime - 63)))
-
+    
     SL = 1 + (0.015 * (L_avg_prime - 50)**2) / np.sqrt(20 + (L_avg_prime - 50)**2)
     SC = 1 + 0.045 * C_avg_prime
     SH = 1 + 0.015 * C_avg_prime * T
-
+    
     delta_theta = 30 * np.exp(-((h_avg_prime - 275) / 25)**2)
     RC = 2 * np.sqrt(C_avg_prime**7 / (C_avg_prime**7 + 25**7))
     RT = -RC * np.sin(np.radians(2 * delta_theta))
-
+    
     delta_E = np.sqrt(
         (delta_L_prime / (kL * SL))**2 +
         (delta_C_prime / (kC * SC))**2 +
         (delta_H_prime / (kH * SH))**2 +
         RT * (delta_C_prime / (kC * SC)) * (delta_H_prime / (kH * SH))
     )
+    
     return delta_E
 
 
+# Pre-calcola i valori LAB
 COLOR_LAB_CACHE = {color.name: rgb_to_lab(color.rgb) for color in COLOR_DATABASE}
 
 
 def find_closest_color(rgb):
+    """Trova il colore più vicino con Delta-E CIE2000."""
     target_lab = rgb_to_lab(rgb)
+    
     min_distance = float('inf')
     closest_color = None
+    
     for color in COLOR_DATABASE:
         color_lab = COLOR_LAB_CACHE[color.name]
         distance = delta_e_cie2000(target_lab, color_lab)
+        
         if distance < min_distance:
             min_distance = distance
             closest_color = color
+    
     return (closest_color.name, closest_color.name_it, closest_color.hex_code, min_distance)
 
 
@@ -461,6 +530,7 @@ KMEANS_CLUSTERS = 3
 
 
 def _apply_clahe(roi):
+    """CLAHE: Equalizzazione luminosità locale."""
     if roi.size == 0:
         return roi
     lab = cv2.cvtColor(roi, cv2.COLOR_BGR2LAB)
@@ -470,13 +540,17 @@ def _apply_clahe(roi):
 
 
 def _extract_dominant_kmeans(roi, n_clusters=3):
+    """Colore dominante via K-Means."""
     pixels = roi.reshape(-1, 3).astype(np.float32)
+    
     if len(pixels) < n_clusters:
         return np.mean(pixels, axis=0).astype(int)
+    
     criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 10, 1.0)
     _, labels, centers = cv2.kmeans(
         pixels, n_clusters, None, criteria, 3, cv2.KMEANS_PP_CENTERS
     )
+    
     dominant_idx = np.argmax(np.bincount(labels.flatten()))
     return centers[dominant_idx].astype(int)
 
@@ -489,37 +563,40 @@ GRID_SIZES = [3, 5, 7]
 
 
 def detect_grid_colors(frame, grid_size=5, sample_size=12):
+    """Campiona colori su una griglia NxN."""
     height, width = frame.shape[:2]
     colors = []
+    
     margin_x = int(width * 0.28)
     margin_y = int(height * 0.28)
-
+    
     for row in range(grid_size):
         for col in range(grid_size):
             px = margin_x + int((width - 2 * margin_x) * col / max(1, grid_size - 1))
             py = margin_y + int((height - 2 * margin_y) * row / max(1, grid_size - 1))
-
+            
             half = sample_size // 2
             x1 = max(0, px - half)
             y1 = max(0, py - half)
             x2 = min(width, px + half)
             y2 = min(height, py + half)
-
+            
             roi = frame[y1:y2, x1:x2]
             if roi.size == 0:
                 continue
-
+            
             roi = _apply_clahe(roi)
+            
             if roi.size > 9:
-                avg_bgr = _extract_dominant_kmeans(
-                    roi, min(KMEANS_CLUSTERS, roi.shape[0] * roi.shape[1]))
+                avg_bgr = _extract_dominant_kmeans(roi, min(KMEANS_CLUSTERS, roi.shape[0] * roi.shape[1]))
             else:
                 avg_bgr = np.mean(roi, axis=(0, 1)).astype(int)
-
+            
             b, g, r = avg_bgr
             rgb = (int(r), int(g), int(b))
+            
             name_en, name_it, hex_code, distance = find_closest_color(rgb)
-
+            
             colors.append({
                 'rgb': rgb,
                 'bgr': (int(b), int(g), int(r)),
@@ -529,11 +606,15 @@ def detect_grid_colors(frame, grid_size=5, sample_size=12):
                 'pos': (px, py),
                 'distance': distance
             })
+    
     return colors
 
 
 def export_palette(palette, grid_size):
+    """Esporta la palette come JSON + PNG."""
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    # JSON
     json_data = {
         "timestamp": datetime.now().isoformat(),
         "grid": f"{grid_size}x{grid_size}",
@@ -547,60 +628,78 @@ def export_palette(palette, grid_size):
             "hex": color['hex'],
             "rgb": list(color['rgb']),
         })
-
+    
     json_filename = f"palette_{timestamp}.json"
     with open(json_filename, 'w', encoding='utf-8') as f:
         json.dump(json_data, f, indent=2, ensure_ascii=False)
-
+    
+    # PNG
     swatch_w = 100
     swatch_h = 100
     text_h = 35
     n = len(palette)
     if n == 0:
         return json_filename
-
+    
     cols = math.ceil(math.sqrt(n))
     rows = math.ceil(n / cols)
+    
     img_w = cols * swatch_w
     img_h = rows * (swatch_h + text_h)
     img = np.zeros((img_h, img_w, 3), dtype=np.uint8)
     img[:] = (30, 30, 30)
-
+    
     for i, color in enumerate(palette):
         col = i % cols
         row = i // cols
         x = col * swatch_w
         y = row * (swatch_h + text_h)
-        cv2.rectangle(img, (x + 2, y + 2),
-                      (x + swatch_w - 2, y + swatch_h - 2), color['bgr'], -1)
+        
+        cv2.rectangle(img, (x + 2, y + 2), (x + swatch_w - 2, y + swatch_h - 2), color['bgr'], -1)
         cv2.putText(img, color['hex'], (x + 5, y + swatch_h + 16),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
         cv2.putText(img, color['name_it'][:10], (x + 5, y + swatch_h + 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.3, (150, 150, 150), 1)
-
+    
     png_filename = f"palette_{timestamp}.png"
     cv2.imwrite(png_filename, img)
+    
     return json_filename
 
 
+# ============================================================
+# DISEGNO GRIGLIA MINIMALE (canvas sintetico, no webcam feed)
+# ============================================================
+
 def draw_minimal_grid(grid_colors, grid_size, win_w=600, win_h=600):
+    """
+    Genera un canvas che riempie esattamente la finestra.
+    I quadrati si adattano alle dimensioni della finestra.
+    """
     canvas = np.zeros((win_h, win_w, 3), dtype=np.uint8)
+    
+    # Calcola dimensione quadrati per riempire tutto
     swatch_w = win_w // grid_size
     swatch_h = win_h // grid_size
+    
     for i, color in enumerate(grid_colors):
         row = i // grid_size
         col = i % grid_size
+        
         x = col * swatch_w
         y = row * swatch_h
+        
         cv2.rectangle(canvas, (x, y), (x + swatch_w, y + swatch_h), color['bgr'], -1)
+    
     return canvas
 
 
 # ============================================================
-# SELEZIONE CAMERA
+# MAIN
 # ============================================================
 
 def list_cameras():
+    """Elenca le webcam disponibili."""
     cameras = []
     for i in range(10):
         cap = cv2.VideoCapture(i)
@@ -613,17 +712,22 @@ def list_cameras():
 
 
 def select_camera():
+    """Seleziona webcam."""
     print("\n[SCAN] Ricerca webcam...")
     cameras = list_cameras()
+    
     if not cameras:
         print("[!] Nessuna webcam trovata, provo ID 0...")
         return 0
+    
     print(f"[CAM] Trovate: {len(cameras)}")
     for cam_id in cameras:
         print(f"  [{cam_id}] Camera {cam_id}")
+    
     if len(cameras) == 1:
         print(f"[OK] Camera {cameras[0]} selezionata")
         return cameras[0]
+    
     while True:
         try:
             choice = input(f"> Seleziona camera (0-{cameras[-1]}): ")
@@ -636,22 +740,26 @@ def select_camera():
 
 
 def detect_center_color(frame, center_size=50):
+    """Rileva il colore dominante al centro del frame."""
     height, width = frame.shape[:2]
     cx, cy = width // 2, height // 2
     half = center_size // 2
     half = min(half, cx, cy, width - cx, height - cy)
     if half < 1:
         half = 1
+    
     roi = frame[cy - half:cy + half, cx - half:cx + half]
     roi = _apply_clahe(roi)
+    
     if roi.size > 9:
-        avg_bgr = _extract_dominant_kmeans(
-            roi, min(KMEANS_CLUSTERS, roi.shape[0] * roi.shape[1]))
+        avg_bgr = _extract_dominant_kmeans(roi, min(KMEANS_CLUSTERS, roi.shape[0] * roi.shape[1]))
     else:
         avg_bgr = np.mean(roi, axis=(0, 1)).astype(int)
+    
     b, g, r = avg_bgr
     rgb = (int(r), int(g), int(b))
     name_en, name_it, hex_code, distance = find_closest_color(rgb)
+    
     return {
         'rgb': rgb,
         'bgr': (int(b), int(g), int(r)),
@@ -662,167 +770,96 @@ def detect_center_color(frame, center_size=50):
     }
 
 
-# ============================================================
-# MAIN
-# ============================================================
-
 def main():
-    global COMMON_ANODE
-
     print("\n" + "=" * 50)
-    print("  LAVAGNA LED INTERATTIVA")
-    print("  Disegna con le mani sui pannelli LED!")
-    print(f"  Arduino: {ARDUINO_COLS}x{ARDUINO_ROWS} video seriale")
+    print("  REGIA LEDWALL - Multi-Pannello + Arduino Video")
+    print(f"  ESP: {len(ESP_IPS)} pannelli ({TOTAL_WIDTH}x{PANEL_HEIGHT})")
+    if ARDUINO_ENABLED:
+        print(f"  Arduino: {ARDUINO_COLS}x{ARDUINO_ROWS} video seriale")
     print("=" * 50)
-
-    # ── FIX 1: seleziona camera PRIMA di aprirla ──
-    camera_id = select_camera()
-
+    
+    # --- MODIFICA 1: Bypassata la selezione manuale per avvii automatici in background ---
+    camera_id = 0 
+    
     print(f"\n[CAM] Avvio webcam {camera_id}...")
     cap = cv2.VideoCapture(camera_id)
-
+    
     if not cap.isOpened():
         print("[X] Impossibile aprire la webcam!")
         return
-
+    
+    # Risoluzione bassa per risparmiare risorse
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-
-    # ── Audio synth ──
-    synth = AudioSynth()
-
-    # ── Tracker e Canvas (una sola inizializzazione!) ──
-    tracker = HandTracker(canvas_width=LOGICAL_WIDTH,
-                          canvas_height=LOGICAL_HEIGHT)
-    canvas_led = LEDCanvas(LOGICAL_WIDTH, LOGICAL_HEIGHT)
-
+    
     print("\n" + "-" * 50)
     print("  CONTROLLI:")
-    print("  [1-9]   - Cambia colore pennello")
-    print("  [+/-]   - Cambia dimensione pennello")
-    print("  [C]     - Cancella lavagna")
-    print("  [S]     - Salva disegno come PNG")
-    print("  [I]     - Inverti colori (Common Anode)")
-    print("  [T]     - Modalità Test Matrice (Calibrazione)")
-    print("  [F]     - Fullscreen (toggle)")
+    print("  [F] - Fullscreen (toggle)")
+    print("  [I] - Inverti colori per LED (Common Anode)")
     print("  [Q/ESC] - Esci")
-    print("")
-    print("  GESTI:")
-    print("  Pinch (indice+pollice) = Disegna")
-    print("  Pollice in giù = Cancella lavagna")
-    print("  Segno della pace (V) = Cambia colore pennello")
     print("-" * 50 + "\n")
-
-    # ── Connessioni ──
+    
+    # --- CONNESSIONI ---
+    global COMMON_ANODE
     udp_sock = create_udp_socket()
     arduino_ser = create_arduino_serial()
-
+    
     fullscreen = False
-
-    cv2.namedWindow('Lavagna LED - Webcam', cv2.WINDOW_NORMAL)
-    cv2.namedWindow('Lavagna LED - Canvas', cv2.WINDOW_NORMAL)
-
+    
+    # Finestra ridimensionabile (compatibile GTK/Cocoa/Qt)
+    cv2.namedWindow('Regia Ledwall', cv2.WINDOW_NORMAL)
+    
+    # Slider per controllare i pacchetti al secondo (FPS rete)
+    cv2.createTrackbar('FPS Rete', 'Regia Ledwall', 30, 60, niente)
+    
     arduino_status = "+ Arduino" if arduino_ser else "(no Arduino)"
-
-    # Handshake Arduino
+    
+    # Variabili per Handshake Arduino
     arduino_ready = True
     arduino_last_send_time = time.time()
-
-    # Cooldown cancellazione
-    last_erase_time = 0.0
-    ERASE_COOLDOWN = 1.5
-
-    # Calibrazione
-    calibration_mode = False
-    calib_x = 0
-    calib_y = 0
-    last_calib_time = time.time()
-
-    print(f"\n[LAVAGNA] Lavagna interattiva attiva! {arduino_status}")
-    print(f"  Colore: {canvas_led.get_color_name()} | Pennello: {canvas_led.brush_size}px")
-
+    print(f"\n[STREAM] Inviando streaming video a {len(ESP_IPS)} pannelli ESP {arduino_status}...")
+    
     try:
         while True:
             ret, frame = cap.read()
             if not ret:
                 print("[X] Errore lettura frame!")
                 break
-
-            frame = cv2.flip(frame, 1)
-
-            # ── 1. HAND TRACKING ──
-            hand_states = tracker.process_frame(frame)
-
-            # ── 2. AGGIORNA CANVAS ──
-            active_ids = {s.hand_label for s in hand_states}
-
-            for hid in list(canvas_led._hand_states.keys()):
-                if hid not in active_ids:
-                    canvas_led.draw_at(0, 0, False, hand_id=hid)
-
-            is_any_drawing = any(s.drawing for s in hand_states)
-            if not is_any_drawing:
-                synth.play_note(0, 0, canvas_led.width, canvas_led.height, False)
-
-            for hand_state in hand_states:
-                # Non cancellare mentre qualcuno sta disegnando attivamente
-                if hand_state.thumbs_down and not is_any_drawing and (time.time() - last_erase_time > ERASE_COOLDOWN):
-                    canvas_led.clear()
-                    last_erase_time = time.time()
-                    print("[CANCELLA] Lavagna cancellata con POLLICE IN GIÙ! 👎")
-
-            for hand_state in hand_states:
-                if hand_state.peace_sign:
-                    current_idx = canvas_led.get_color_index()
-                    next_idx = (current_idx + 1) % len(COLOR_PALETTE)
-                    canvas_led.set_color_by_index(next_idx)
-                    print(f"[PACE] Nuovo colore: {canvas_led.get_color_name()}")
-
-                if hand_state.drawing:
-                    canvas_led.draw_at(hand_state.canvas_x, hand_state.canvas_y,
-                                       True, hand_id=hand_state.hand_label,
-                                       is_erasing=False)
-                    synth.play_note(hand_state.canvas_x, hand_state.canvas_y,
-                                   canvas_led.width, canvas_led.height, True)
-
-                elif hand_state.precision_erasing:
-                    canvas_led.draw_at(hand_state.canvas_x, hand_state.canvas_y,
-                                       True, hand_id=hand_state.hand_label,
-                                       is_erasing=True)
-
-                else:
-                    canvas_led.draw_at(hand_state.canvas_x, hand_state.canvas_y,
-                                       False, hand_id=hand_state.hand_label,
-                                       is_erasing=False)
-
-            # ── 3. INVIA FRAME AGLI ESP O ALL'ARDUINO ──
-            raw_rgb = canvas_led.get_frame_rgb()
-
-            # --- INVIA LEDWALL ESP (UDP) ---
-            if udp_sock is not None and ESP_ENABLED:
-                esp_rgb = gamma_table[raw_rgb]
-                if COMMON_ANODE:
-                    esp_rgb = 255 - esp_rgb
-                    
+            
+            # Nessun flip: in base ai test, l'orientamento puro della webcam
+            # combinato con ARDUINO_PANEL_START_BOTTOM = False è quello perfetto.
+            # frame = cv2.flip(frame, 1)
+            fps_voluti = cv2.getTrackbarPos('FPS Rete', 'Regia Ledwall')
+            if fps_voluti == 0:
+                fps_voluti = 1  # Evita divisione per zero
+            delay_ms = int(1000 / fps_voluti)
+            
+            # Ridimensiona il frame alla risoluzione del ledwall e converti BGR -> RGB
+            frame_ridimensionato = cv2.resize(frame, (TOTAL_WIDTH, PANEL_HEIGHT))
+            frame_rgb = cv2.cvtColor(frame_ridimensionato, cv2.COLOR_BGR2RGB)
+            
+            # Applica gamma all'intero frame
+            frame_rgb = gamma_table[frame_rgb]
+            
+            # Inverti colori se Common Anode
+            if COMMON_ANODE:
+                frame_rgb = 255 - frame_rgb
+            
+            # --- AFFETTA E SPEDISCI A OGNI PANNELLO ---
+            if udp_sock is not None:
                 for indice, ip in enumerate(ESP_IPS):
                     taglio_x_inizio = indice * PANEL_WIDTH
                     taglio_x_fine = (indice + 1) * PANEL_WIDTH
                     
-                    fetta = esp_rgb[:, taglio_x_inizio:taglio_x_fine]
-                    # La matrice fisica è cablata per RIGHE orizzontali, non colonne! Niente transpose!
-                    fetta_righe = fetta.copy().astype(np.uint8)
+                    # Estrae la fetta per questo pannello
+                    fetta = frame_rgb[:, taglio_x_inizio:taglio_x_fine]
                     
-                    # Applica Serpentina Orizzontale ESP
-                    if ESP_START_BOTTOM:
-                        fetta_righe = fetta_righe[::-1, :, :]
+                    # === FIX: Traspone le assi per mandare pixel in colonne (alto->basso)
+                    # mantenendo i triplet RGB accoppiati correttamente ===
+                    fetta_colonne = np.transpose(fetta, (1, 0, 2)).astype(np.uint8)
+                    dati_grezzi = fetta_colonne.flatten().tobytes()
                     
-                    if ESP_SERPENTINE_HORIZONTAL:
-                        # Invertiamo l'ordine dei pixel X (colonne) per le righe Y dispari
-                        fetta_righe[1::2] = fetta_righe[1::2, ::-1, :]
-                        
-                    dati_grezzi = fetta_righe.flatten().tobytes()
-                    
-                    # Taglio esattamente a metà dei byte (15x44 = 660 LED = 1980 byte -> metà = 990 byte = 330 LED)
+                    # Taglia i dati a metà in 2 pacchetti (con byte indice)
                     meta = len(dati_grezzi) // 2
                     pacchetto_0 = bytes([0]) + dati_grezzi[:meta]
                     pacchetto_1 = bytes([1]) + dati_grezzi[meta:]
@@ -835,168 +872,78 @@ def main():
                         time.sleep(0.003)
                     except Exception:
                         pass
-
-            # --- INVIA ARDUINO (SERIALE) ---
+            
+            # --- INVIA FRAME ALL'ARDUINO (video seriale) ---
             if arduino_ser is not None:
+                # 1. Controlla se l'Arduino ha mandato l'ACK 'K'
                 if arduino_ser.in_waiting > 0:
                     risposta = arduino_ser.read_all()
                     if b'K' in risposta:
                         arduino_ready = True
-
+                
+                # 1b. Timeout di sicurezza: se Arduino ha perso un frame e non ha mandato K
+                # per più di 0.5 secondi, forza l'invio per sbloccare la situazione.
                 if not arduino_ready and (time.time() - arduino_last_send_time > 0.5):
                     arduino_ready = True
-
+                
+                # 2. Se l'Arduino è pronto, invia un nuovo frame
                 if arduino_ready:
                     try:
-                        ard_rgb = canvas_led.get_frame_rgb()
-                        if ard_rgb.shape[1] != ARDUINO_COLS or ard_rgb.shape[0] != ARDUINO_ROWS:
-                            ard_rgb = cv2.resize(ard_rgb, (ARDUINO_COLS, ARDUINO_ROWS), interpolation=cv2.INTER_AREA)
-
-                        if ARDUINO_MIRROR_HORIZONTAL:
-                            ard_rgb = cv2.flip(ard_rgb, 1)
-
-                        # === MODALITÀ CALIBRAZIONE ===
-                        if calibration_mode:
-                            ard_rgb = np.zeros((ARDUINO_ROWS, ARDUINO_COLS, 3),
-                                               dtype=np.uint8)
-                            now_t = time.time()
-                            if now_t - last_calib_time > 0.05:
-                                calib_x += 1
-                                if calib_x >= ARDUINO_COLS:
-                                    calib_x = 0
-                                    calib_y += 1
-                                    if calib_y >= ARDUINO_ROWS:
-                                        calib_y = 0
-                                last_calib_time = now_t
-
-                            ard_rgb[calib_y, :] = (50, 0, 0)
-                            ard_rgb[:, calib_x] = (0, 50, 0)
-                            ard_rgb[calib_y, calib_x] = (255, 255, 255)
-                        # === FINE CALIBRAZIONE ===
-
-                        ard_rgb = gamma_table[ard_rgb]
-                        if COMMON_ANODE:
-                            ard_rgb = 255 - ard_rgb
-
-                        rgb_bytes = map_frame_to_leds(ard_rgb)
-                        arduino_ser.write(MAGIC_HEADER + rgb_bytes)
-
-                        arduino_ready = False
+                        send_arduino_frame(arduino_ser, frame)
+                        arduino_ready = False # Aspetta il prossimo 'K'
                         arduino_last_send_time = time.time()
                     except Exception as e:
                         print(f"\n[X] Errore invio frame ad Arduino: {e}")
-                        arduino_ser = None
+                        arduino_ser = None  # Disabilita per non floodare la console
                         print("  -> Arduino scollegato a causa dell'errore.")
+            
+            # Mostra l'immagine ridimensionata a schermo (anteprima ledwall)
+            cv2.imshow('Regia Ledwall', frame_ridimensionato)
 
-            # ── 4. VISUALIZZAZIONE ──
-            frame_preview = frame.copy()
-            for hand_state in hand_states:
-                tracker.draw_overlay(frame_preview, hand_state)
-
-            color_bgr = tuple(int(c) for c in canvas_led.current_color[::-1])
-            info_text = (f"Colore: {canvas_led.get_color_name()} | "
-                         f"Pennello: {canvas_led.brush_size}px")
-            cv2.putText(frame_preview, info_text, (10, frame.shape[0] - 15),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, color_bgr, 2)
-
-            cv2.rectangle(frame_preview, (frame.shape[1] - 50, 10),
-                          (frame.shape[1] - 10, 50), color_bgr, -1)
-            cv2.rectangle(frame_preview, (frame.shape[1] - 50, 10),
-                          (frame.shape[1] - 10, 50), (255, 255, 255), 1)
-
-            cv2.imshow('Lavagna LED - Webcam', frame_preview)
-
-            cursor_x, cursor_y = -1, -1
-            for h in hand_states:
-                if h.detected:
-                    cursor_x, cursor_y = h.canvas_x, h.canvas_y
-                    break
-
-            canvas_preview = canvas_led.get_preview(
-                scale=15, cursor_x=cursor_x, cursor_y=cursor_y
-            )
-            cv2.imshow('Lavagna LED - Canvas', canvas_preview)
-
-            # ── 5. INPUT TASTIERA ──
-            key = cv2.waitKey(16) & 0xFF
-
+            # Input - delay_ms controllato dallo slider FPS
+            key = cv2.waitKey(delay_ms) & 0xFF
+            
             if key == ord('q') or key == 27:
                 print("\n[BYE] Arrivederci!")
                 break
             elif key == ord('f'):
                 fullscreen = not fullscreen
-                prop = (cv2.WINDOW_FULLSCREEN if fullscreen
-                        else cv2.WINDOW_NORMAL)
-                cv2.setWindowProperty('Lavagna LED - Webcam',
-                                      cv2.WND_PROP_FULLSCREEN, prop)
-            elif key == ord('t'):
-                calibration_mode = not calibration_mode
-                state = "ATTIVA" if calibration_mode else "DISATTIVA"
-                print(f"\n[TEST] Modalità Calibrazione Matrice: {state}")
-                if calibration_mode:
-                    print("=> Guarda il pannello LED. Un punto bianco con croce "
-                          "rosso/verde lo attraverserà.")
+                if fullscreen:
+                    cv2.setWindowProperty('Regia Ledwall', cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+                else:
+                    cv2.setWindowProperty('Regia Ledwall', cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_NORMAL)
             elif key == ord('i'):
                 COMMON_ANODE = not COMMON_ANODE
                 state = "ATTIVA" if COMMON_ANODE else "DISATTIVA"
                 print(f"\n[TOGGLE] Modalità Inversione: {state}")
-            elif key == ord('c'):
-                canvas_led.clear()
-                last_erase_time = time.time()
-                print("[CANCELLA] Lavagna cancellata (tasto C)")
-            elif key == ord('s'):
-                filename = (f"disegno_led_"
-                            f"{datetime.now().strftime('%Y%m%d_%H%M%S')}.png")
-                img = canvas_led.get_frame_rgb()
-                cv2.imwrite(filename, cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
-                print(f"[SALVA] Immagine salvata come {filename}")
-            elif key == ord('+') or key == ord('='):
-                new_size = min(5, canvas_led.brush_size + 1)
-                canvas_led.set_brush_size(new_size)
-                print(f"[PENNELLO] Dimensione aumentata a {new_size}px")
-            elif key == ord('-'):
-                new_size = max(1, canvas_led.brush_size - 1)
-                canvas_led.set_brush_size(new_size)
-                print(f"[PENNELLO] Dimensione ridotta a {new_size}px")
-            elif ord('1') <= key <= ord('9'):
-                idx = key - ord('1')
-                canvas_led.set_color_by_index(idx)
-                print(f"[COLORE] Tasto {chr(key)} -> "
-                      f"Colore impostato a {canvas_led.get_color_name()}")
-
+    
     finally:
-        tracker.release()
         cap.release()
         cv2.destroyAllWindows()
-
-        # ── FIX 2: shutdown Arduino con header NUOVO ──
+        if udp_sock:
+            try:
+                print("[LED] Spegnimento LED ESP...")
+                # Invia frame nero a tutti i pannelli ESP
+                frame_nero = bytes(PANEL_WIDTH * PANEL_HEIGHT * 3)
+                for ip in ESP_IPS:
+                    meta = len(frame_nero) // 2
+                    udp_sock.sendto(bytes([0]) + frame_nero[:meta], (ip, ESP_PORT))
+                    udp_sock.sendto(bytes([1]) + frame_nero[meta:], (ip, ESP_PORT))
+                    time.sleep(0.02)
+                udp_sock.close()
+                print("[OK] LED ESP spenti. Socket UDP chiuso.")
+            except Exception:
+                pass
         if arduino_ser:
             try:
                 print("[LED] Spegnimento LED Arduino...")
-                black_frame = np.zeros((ARDUINO_ROWS, ARDUINO_COLS, 3),
-                                       dtype=np.uint8)
-                rgb_bytes = map_frame_to_leds(black_frame)
-                arduino_ser.write(MAGIC_HEADER + rgb_bytes)
+                # Invia frame nero all'Arduino
+                arduino_ser.write(b'V' + bytes(ARDUINO_ROWS * ARDUINO_COLS * 3))
                 time.sleep(0.1)
                 arduino_ser.close()
                 print("[OK] LED Arduino spenti. Seriale chiusa.")
             except Exception:
                 pass
-
-        if udp_sock and ESP_ENABLED:
-            try:
-                print("[LED] Spegnimento LED ESP...")
-                frame_nero = bytes(PANEL_WIDTH * PANEL_HEIGHT * 3)
-                for ip in ESP_IPS:
-                    meta = len(frame_nero) // 2
-                    udp_sock.sendto(bytes([0]) + frame_nero[:meta],
-                                    (ip, ESP_PORT))
-                    udp_sock.sendto(bytes([1]) + frame_nero[meta:],
-                                    (ip, ESP_PORT))
-                    time.sleep(0.02)
-                print("[OK] LED ESP spenti.")
-            except Exception as e:
-                print(f"[X] Errore nello spegnimento LED ESP: {e}")
 
 
 if __name__ == "__main__":

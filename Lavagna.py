@@ -263,10 +263,12 @@ MAGIC_HEADER = b'\xFFLE'  # 0xFF 0x4C 0x45
 # ============================================================
 
 def _ping_host(ip, timeout_ms=500):
-    """Quick ping per verificare se un host è raggiungibile."""
+    """Quick ping per verificare se un host e' raggiungibile."""
     try:
+        # Linux: -W e' in secondi; macOS: -W e' in millisecondi
+        wait_val = '1' if sys.platform != 'darwin' else str(timeout_ms)
         result = subprocess.run(
-            ['ping', '-c', '1', '-W', str(timeout_ms), ip],
+            ['ping', '-c', '1', '-W', wait_val, ip],
             capture_output=True, timeout=2
         )
         return result.returncode == 0
@@ -290,9 +292,9 @@ def detect_hardware():
         )
         ARDUINO_ENABLED = len(porte) > 0
         if ARDUINO_ENABLED:
-            print(f"  [✓] Arduino: porta trovata ({porte[0]})")
+            print(f"  [OK] Arduino: porta trovata ({porte[0]})")
         else:
-            print("  [✗] Arduino: nessuna porta seriale USB")
+            print("  [NO] Arduino: nessuna porta seriale USB")
 
     # --- ESP: ping del primo pannello ---
     if ESP_ENABLED == "auto":
@@ -321,8 +323,8 @@ def detect_hardware():
     else:
         mode = "NESSUN DISPOSITIVO — Solo preview"
 
-    print(f"\n  ► MODALITÀ: {mode}")
-    print(f"  ► Canvas: {LOGICAL_WIDTH}x{LOGICAL_HEIGHT}")
+    print(f"\n  -> MODALITA': {mode}")
+    print(f"  -> Canvas: {LOGICAL_WIDTH}x{LOGICAL_HEIGHT}")
 
 
 def apply_gamma(color):
@@ -839,7 +841,7 @@ def main():
                 if hand_state.thumbs_down and not is_any_drawing and (time.time() - last_erase_time > ERASE_COOLDOWN):
                     canvas_led.clear()
                     last_erase_time = time.time()
-                    print("[CANCELLA] Lavagna cancellata con POLLICE IN GIÙ! 👎")
+                    print("[CANCELLA] Lavagna cancellata con POLLICE IN GIU!")
 
             for hand_state in hand_states:
                 if hand_state.peace_sign:

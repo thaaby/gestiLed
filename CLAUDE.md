@@ -4,63 +4,84 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**Lavagna LED Interattiva** — An interactive LED drawing system using a 32x32 WS2812B LED matrix (4 panels of 8x32) controlled by an Arduino. Users draw on the matrix via hand gestures captured by webcam (MediaPipe), or stream a game window (DOOM) directly to the LEDs.
+**Lavagna LED Interattiva** — Sistema di disegno interattivo su pannelli LED controllati tramite gesti delle mani (webcam + MediaPipe). Il sistema ha due modalita' di output mutuamente esclusive, rilevate automaticamente all'avvio (`detect_hardware()`):
+
+- **Modalita' ESP (LED Wall)**: 6 pannelli ESP da 15x44 pixel ciascuno, collegati via WiFi/UDP. Si attiva se il primo ESP risponde al ping. Canvas logico: 90x44.
+- **Modalita' Arduino (fallback)**: 7 pannelli da 8x32 pixel (matrici WS2812B), collegati in serie via cavo seriale ad un Arduino. Si attiva se viene trovata una porta seriale USB. Canvas logico: 56x32.
+
+Se entrambi sono disponibili, si attiva la modalita' DUAL (canvas ESP come primario).
 
 ## Setup
 
 ```bash
-# Create and activate virtual environment
 python3 -m venv venv
 source venv/bin/activate
-
-# Install dependencies
 pip install -r requirements.txt
+# doom_ledwall.py richiede anche: pip install mss
 ```
 
-The `hand_landmarker.task` MediaPipe model file must be present in the project root (already committed). `HandTracker` will raise `FileNotFoundError` if it's missing.
+Il file `hand_landmarker.task` (modello MediaPipe) deve essere nella root del progetto.
 
 ## Running
 
 ```bash
-# Interactive drawing mode (hand gestures → LED matrix)
-python3 <main_entry>.py
+# Applicazione principale — disegno interattivo con gesti
+python3 Lavagna.py
 
-# Stream DOOM window to LED matrix
+# Streaming finestra DOOM sulla matrice Arduino (solo macOS, usa osascript)
 python3 doom_ledwall.py
+
+# Test pattern Arduino (per calibrazione e debug pannelli)
+python3 test_arduino.py
+
+# Versione Linux / Raspberry Pi 5
+python3 Lavagna-Linux/minimalv2.py
 ```
-
-`doom_ledwall.py` uses AppleScript (`osascript`) to detect the frontmost window on macOS — macOS only. It shows a countdown for the user to click the DOOM window, then streams it at ~32x32 resolution over serial.
-
-## Arduino
-
-- Firmware: `test_avanzato/test_avanzato.ino` — standalone animation patterns (FastLED, no serial video protocol)
-- For video streaming, a different firmware (`arduino_video_only.ino`, not in this repo) must be flashed
-- Serial baud: **500000**
-- Serial port: auto-detected (`/dev/ttyUSB*`, `/dev/ttyACM*`, `/dev/cu.usbmodem*`, `/dev/cu.usbserial*`)
 
 ## Architecture
 
-### Serial Protocol (Python → Arduino)
-Every frame is sent as: `MAGIC_HEADER (0xFF 0x4C 0x45)` + 3072 bytes of RGB pixel data.
-Arduino responds with `'K'` (ACK) per frame. Python uses non-blocking send with a 0.5s ACK timeout fallback.
+### Due protocolli di output
 
-### Panel Mapping (`map_frame_to_leds`)
-The 32x32 frame is split into 4 panels of 8×32. Panel logical order (`ARDUINO_PANEL_ORDER = [3,2,1,0]`) maps panel index to physical X-position. Each panel uses serpentine/snake wiring (`ARDUINO_SERPENTINE_X = True`: odd rows are reversed). Horizontal mirror and gamma correction (γ=2.5) are applied before sending.
+**ESP (UDP)**: ogni pannello ha un IP fisso (`ESP_IPS` in Lavagna.py). Il frame viene tagliato in fette verticali di 15px, ogni fetta viene serializzata riga per riga con serpentina orizzontale, divisa in 2 pacchetti UDP (prefisso `0x00` e `0x01`), e inviata sulla porta 4210. Pausa di 3ms tra pannelli per non sovraccaricare il router.
 
-### Module Roles
-- **`led_canvas.py` (`LEDCanvas`)** — Owns the pixel state as a NumPy array `(height, width, 3)`. Handles Bresenham line interpolation between frames, multi-hand drawing with per-hand state, brush sizes 1–3, and PNG export.
-- **`hand_tracker.py` (`HandTracker`)** — Wraps MediaPipe HandLandmarker (LIVE_STREAM async mode). Detects gestures with multi-frame hysteresis:
-  - **Pinch** (thumb+index): draw
-  - **Index only + thumb curled**: precision eraser
-  - **Peace sign** (V): cycle color
-  - **Thumbs down**: clear canvas
-  - EMA smoothing (`α=0.35`) reduces jitter. Active margin (10% each side) clips the usable webcam area.
-- **`audio_synth.py` (`AudioSynth`)** — Pygame-based synth that maps canvas Y-coordinate to pentatonic scale notes (3 octaves) and X-coordinate to stereo panning.
-- **`doom_ledwall.py`** — Standalone script; captures a macOS window via `mss`, crops to 4:3, resizes to 32×32, applies the same gamma+mirror+panel-mapping pipeline, and streams via serial.
+**Arduino (Seriale)**: frame inviato come `MAGIC_HEADER (0xFF 0x4C 0x45)` + buffer RGB. Il buffer e' ordinato per pannelli (non per righe): la funzione `map_frame_to_leds()` itera pannello per pannello secondo `ARDUINO_PANEL_ORDER`, applicando cablaggio serpentina (`ARDUINO_SERPENTINE_X`). Arduino risponde con `'K'` (ACK). Invio non-bloccante con timeout 0.5s.
 
-### Key Constants (shared across files)
-- Matrix: 32×32, panels: 4×(8×32)
-- `ARDUINO_PANEL_ORDER = [3, 2, 1, 0]` — physical panel X positions
-- `MAGIC_HEADER = b'\xFFLE'`
-- `GAMMA = 2.5`
-- `ARDUINO_MIRROR_HORIZONTAL = True`
+Prima dell'invio: mirror orizzontale + correzione gamma (γ=2.5) tramite lookup table.
+
+### Moduli
+
+- **`Lavagna.py`** — Entry point principale. Orchestrazione: detect hardware → selezione camera → loop principale (tracking → canvas → invio LED → preview OpenCV → input tastiera). Contiene anche il database colori (~100 colori con nomi IT/EN), la pipeline di riconoscimento colore tramite CLAHE + K-Means + Delta-E CIE2000, e la modalita' calibrazione matrice (tasto T).
+- **`hand_tracker.py` (`HandTracker`)** — MediaPipe HandLandmarker in modalita' LIVE_STREAM asincrona (max 2 mani). Gesti riconosciuti con isteresi multi-frame per evitare falsi positivi:
+  - **Pinch** (pollice+indice vicini): disegna. Isteresi con soglie diverse per attivazione/disattivazione + grace period di 3 frame.
+  - **Indice solo + pollice piegato**: cancellino di precisione. Grace period post-drawing di 8 frame per evitare attivazione accidentale.
+  - **V (pace)**: cambia colore. Richiede 5 frame stabili + cooldown 1s.
+  - **Pollice in giu'**: cancella tutto. Richiede 5 frame stabili + cooldown 1.5s.
+  - Smoothing EMA (α=0.35) sulla posizione. Zona attiva: margine 10% su ogni lato.
+- **`led_canvas.py` (`LEDCanvas`)** — Stato pixel come array NumPy `(height, width, 3)`. Disegno con interpolazione Bresenham tra frame successivi. Supporta multi-mano (stato separato per hand_id), brush size 1-3, e esportazione PNG.
+- **`audio_synth.py` (`AudioSynth`)** — Sintetizzatore Pygame. Scala pentatonica su 3 ottave: Y mappa alla nota (alto=acuto, basso=grave), X mappa al panning stereo.
+- **`doom_ledwall.py`** — Script standalone. Cattura finestra macOS via `mss` + AppleScript, crop 4:3, resize a 56x32, stessa pipeline gamma+mirror+panel-mapping, streaming seriale.
+- **`Lavagna-Linux/minimalv2.py`** — Port per Raspberry Pi 5. Thread dedicato alla cattura webcam (producer/consumer), risoluzione 320x240, frame skip (MediaPipe ogni 2 frame), backend V4L2. Stessa logica di detect_hardware() con entrambe le modalita'.
+
+### Arduino firmware
+
+- **`arduino_video_only/arduino_video_only.ino`** — Firmware per ricezione video. Solo ricezione seriale, nessuna animazione in background. FastLED.show() chiamato solo dopo frame completo per non perdere byte seriali.
+- **`test_avanzato/test_avanzato.ino`** — Firmware standalone con pattern animati (FastLED). Non usa il protocollo seriale video.
+
+### Costanti chiave (duplicate in piu' file)
+
+Le costanti Arduino sono ripetute identiche in `Lavagna.py`, `Lavagna-Linux/minimalv2.py`, `doom_ledwall.py`, e `test_arduino.py`. Se ne modifichi una, aggiorna tutte.
+
+```
+ARDUINO_BAUD = 500000
+ARDUINO_PANEL_W = 8, ARDUINO_PANEL_H = 32
+MAGIC_HEADER = b'\xFFLE'
+GAMMA = 2.5
+ARDUINO_SERPENTINE_X = True
+ARDUINO_MIRROR_VERTICAL = True
+```
+
+**ATTENZIONE mirror orizzontale**: `Lavagna.py` e `minimalv2.py` hanno `ARDUINO_MIRROR_HORIZONTAL = False` perche' la webcam gia' flippa il frame (`cv2.flip(frame, 1)`). `doom_ledwall.py` e `test_arduino.py` hanno `True` perche' non usano la webcam.
+
+### Controlli tastiera (Lavagna.py)
+
+`1-9` colore | `+/-` brush size | `C` cancella | `S` salva PNG | `I` inverti (common anode) | `T` calibrazione | `F` fullscreen | `Q/ESC` esci

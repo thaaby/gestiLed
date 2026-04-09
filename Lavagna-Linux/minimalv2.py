@@ -254,6 +254,10 @@ TOTAL_WIDTH = PANEL_WIDTH * len(ESP_IPS)
 ESP_SERPENTINE_HORIZONTAL = True
 ESP_START_BOTTOM = False
 
+# ============================================================
+# CONFIGURAZIONE WEBCAM
+# ============================================================
+CAMERA_SCAN = False  # False = usa webcam 0 direttamente. True = scansiona e scegli.
 
 # ============================================================
 # CONFIGURAZIONE ARDUINO VIDEO (SERIALE)
@@ -262,17 +266,18 @@ ARDUINO_ENABLED = "auto"
 ARDUINO_PORT = "auto"
 ARDUINO_BAUD = 500000
 ARDUINO_ROWS = 32
-ARDUINO_COLS = 32
+ARDUINO_COLS = 56
 ARDUINO_PANEL_W = 8
 ARDUINO_PANEL_H = 32
-ARDUINO_PANELS_COUNT = 4
-ARDUINO_MIRROR_HORIZONTAL = True
+ARDUINO_PANELS_COUNT = 7
+ARDUINO_MIRROR_HORIZONTAL = False
+ARDUINO_MIRROR_VERTICAL = True
 
 LOGICAL_WIDTH = ARDUINO_COLS
 LOGICAL_HEIGHT = ARDUINO_ROWS
 
-ARDUINO_PANEL_ORDER = [3, 2, 1, 0]
-ARDUINO_PANEL_START_BOTTOM = [False, False, False, False]
+ARDUINO_PANEL_ORDER = [6, 5, 4, 3, 2, 1, 0]
+ARDUINO_PANEL_START_BOTTOM = [False, False, False, False, False, False, False]
 ARDUINO_SERPENTINE_X = True
 
 GAMMA = 2.5
@@ -694,6 +699,10 @@ def list_cameras():
 
 
 def select_camera():
+    if not CAMERA_SCAN:
+        print("[CAM] Webcam 0 (default — CAMERA_SCAN = False)")
+        return 0
+
     print("\n[SCAN] Ricerca webcam (V4L2)...")
     cameras = list_cameras()
     if not cameras:
@@ -914,6 +923,8 @@ def main():
                                                  interpolation=cv2.INTER_AREA)
                         if ARDUINO_MIRROR_HORIZONTAL:
                             ard_rgb = cv2.flip(ard_rgb, 1)
+                        if ARDUINO_MIRROR_VERTICAL:
+                            ard_rgb = cv2.flip(ard_rgb, 0)
 
                         if calibration_mode:
                             ard_rgb = np.zeros((ARDUINO_ROWS, ARDUINO_COLS, 3), dtype=np.uint8)

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-DOOM → ARDUINO 32x32 (SPECCHIO)
+DOOM → ARDUINO 56x32 (SPECCHIO)
 =================================
-Cattura la finestra attiva di DOOM e la streamma sulla matrice Arduino 32x32.
+Cattura la finestra attiva di DOOM e la streamma sulla matrice Arduino 56x32.
 Usa la logica ESATTA di minimalv2.py: invio non-bloccante, MAGIC_HEADER,
 mappatura pannelli con serpentina, gamma e mirror orizzontale.
 
@@ -35,14 +35,15 @@ except ImportError:
 ARDUINO_PORT           = "auto"
 ARDUINO_BAUD           = 500000
 ARDUINO_ROWS           = 32
-ARDUINO_COLS           = 32
+ARDUINO_COLS           = 56
 ARDUINO_PANEL_W        = 8
 ARDUINO_PANEL_H        = 32
-ARDUINO_PANELS_COUNT   = 4
+ARDUINO_PANELS_COUNT   = 7
 ARDUINO_MIRROR_HORIZONTAL = True
+ARDUINO_MIRROR_VERTICAL = True
 
-ARDUINO_PANEL_ORDER        = [3, 2, 1, 0]
-ARDUINO_PANEL_START_BOTTOM = [False, False, False, False]
+ARDUINO_PANEL_ORDER        = [6, 5, 4, 3, 2, 1, 0]
+ARDUINO_PANEL_START_BOTTOM = [False, False, False, False, False, False, False]
 ARDUINO_SERPENTINE_X       = True
 
 MAGIC_HEADER = b'\xFFLE'   # 0xFF 0x4C 0x45
@@ -61,7 +62,7 @@ FORCE_ASPECT_RATIO = 4 / 3
 # MAPPATURA PANNELLI — IDENTICA A minimalv2.py / test_arduino.py
 # ============================================================
 def map_frame_to_leds(frame_rgb: np.ndarray) -> bytes:
-    """Converte frame 32x32 RGB in buffer seriale ordinato per pannelli."""
+    """Converte frame 56x32 RGB in buffer seriale ordinato per pannelli."""
     out_buffer = bytearray(ARDUINO_COLS * ARDUINO_ROWS * 3)
     idx = 0
 
@@ -150,8 +151,8 @@ def get_frontmost_window_bounds():
 
 def countdown_and_capture():
     preview = np.zeros((300, 500, 3), dtype=np.uint8)
-    cv2.namedWindow("DOOM 32x32 - Setup", cv2.WINDOW_NORMAL)
-    cv2.resizeWindow("DOOM 32x32 - Setup", 500, 300)
+    cv2.namedWindow("DOOM 56x32 - Setup", cv2.WINDOW_NORMAL)
+    cv2.resizeWindow("DOOM 56x32 - Setup", 500, 300)
 
     for i in range(COUNTDOWN_SECONDS, 0, -1):
         preview[:] = (20, 20, 40)
@@ -161,15 +162,15 @@ def countdown_and_capture():
                     cv2.FONT_HERSHEY_SIMPLEX, 0.65, (200, 200, 200), 1)
         cv2.putText(preview, str(i), (210, 230),
                     cv2.FONT_HERSHEY_SIMPLEX, 3.5, (50, 255, 100), 5)
-        cv2.imshow("DOOM 32x32 - Setup", preview)
+        cv2.imshow("DOOM 56x32 - Setup", preview)
         cv2.waitKey(1000)
 
     preview[:] = (20, 40, 20)
     cv2.putText(preview, "Lettura finestra...", (80, 160),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (100, 255, 100), 2)
-    cv2.imshow("DOOM 32x32 - Setup", preview)
+    cv2.imshow("DOOM 56x32 - Setup", preview)
     cv2.waitKey(500)
-    cv2.destroyWindow("DOOM 32x32 - Setup")
+    cv2.destroyWindow("DOOM 56x32 - Setup")
     return get_frontmost_window_bounds()
 
 
@@ -178,7 +179,7 @@ def countdown_and_capture():
 # ============================================================
 def main():
     print("\n" + "=" * 55)
-    print("  DOOM → ARDUINO 32x32")
+    print("  DOOM → ARDUINO 56x32")
     print("=" * 55 + "\n")
 
     ser = connect_arduino()
@@ -202,8 +203,8 @@ def main():
     print("\n[DOOM MODE] Premi Q per uscire.\n")
 
     scale = 14
-    cv2.namedWindow("DOOM 32x32 - Preview", cv2.WINDOW_NORMAL)
-    cv2.resizeWindow("DOOM 32x32 - Preview", ARDUINO_COLS * scale, ARDUINO_ROWS * scale)
+    cv2.namedWindow("DOOM 56x32 - Preview", cv2.WINDOW_NORMAL)
+    cv2.resizeWindow("DOOM 56x32 - Preview", ARDUINO_COLS * scale, ARDUINO_ROWS * scale)
 
     # Stato invio non-bloccante (come in minimalv2.py)
     arduino_ready         = True
@@ -259,6 +260,8 @@ def main():
                     ard_rgb = frame_rgb.copy()
                     if ARDUINO_MIRROR_HORIZONTAL:
                         ard_rgb = cv2.flip(ard_rgb, 1)
+                    if ARDUINO_MIRROR_VERTICAL:
+                        ard_rgb = cv2.flip(ard_rgb, 0)
 
                     # Applica gamma (come in minimalv2.py)
                     ard_rgb = gamma_table[ard_rgb]
@@ -279,7 +282,7 @@ def main():
             preview = cv2.resize(frame_piccolo,
                                  (ARDUINO_COLS * scale, ARDUINO_ROWS * scale),
                                  interpolation=cv2.INTER_NEAREST)
-            cv2.imshow("DOOM 32x32 - Preview", preview)
+            cv2.imshow("DOOM 56x32 - Preview", preview)
 
             frame_count += 1
             elapsed = time.time() - t_start

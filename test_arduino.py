@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-TEST ARDUINO LED MATRICE 32x32
+TEST ARDUINO LED MATRICE 56x32
 ==============================
 Script standalone per testare la comunicazione seriale con l'Arduino.
 
@@ -40,14 +40,15 @@ except ImportError:
 ARDUINO_PORT = "auto"
 ARDUINO_BAUD = 500000
 ARDUINO_ROWS = 32
-ARDUINO_COLS = 32
+ARDUINO_COLS = 56
 ARDUINO_PANEL_W = 8
 ARDUINO_PANEL_H = 32
-ARDUINO_PANELS_COUNT = 4
+ARDUINO_PANELS_COUNT = 7
 ARDUINO_MIRROR_HORIZONTAL = True
+ARDUINO_MIRROR_VERTICAL = True
 
-ARDUINO_PANEL_ORDER = [3, 2, 1, 0]
-ARDUINO_PANEL_START_BOTTOM = [False, False, False, False]
+ARDUINO_PANEL_ORDER = [6, 5, 4, 3, 2, 1, 0]
+ARDUINO_PANEL_START_BOTTOM = [False, False, False, False, False, False, False]
 ARDUINO_SERPENTINE_X = True
 
 GAMMA = 2.5
@@ -61,7 +62,7 @@ MAGIC_HEADER = b'\xFFLE'  # 0xFF 0x4C 0x45
 # MAPPING (identico a minimalv2.py)
 # ============================================================
 def map_frame_to_leds(frame_rgb):
-    """Converte un frame 32x32 RGB in buffer seriale per Arduino."""
+    """Converte un frame 56x32 RGB in buffer seriale per Arduino."""
     out_buffer = bytearray(ARDUINO_COLS * ARDUINO_ROWS * 3)
     idx = 0
 
@@ -131,13 +132,15 @@ def connect_arduino():
 # INVIO FRAME
 # ============================================================
 def send_frame(ser, frame_rgb, retries=3):
-    """Invia un frame 32x32 RGB all'Arduino con retry."""
+    """Invia un frame 56x32 RGB all'Arduino con retry."""
     if frame_rgb.shape != (ARDUINO_ROWS, ARDUINO_COLS, 3):
         frame_rgb = cv2.resize(frame_rgb, (ARDUINO_COLS, ARDUINO_ROWS),
                                interpolation=cv2.INTER_AREA)
 
     if ARDUINO_MIRROR_HORIZONTAL:
         frame_rgb = cv2.flip(frame_rgb, 1)
+    if ARDUINO_MIRROR_VERTICAL:
+        frame_rgb = cv2.flip(frame_rgb, 0)
 
     frame_gamma = gamma_table[frame_rgb]
     rgb_bytes = map_frame_to_leds(frame_gamma)
@@ -182,6 +185,9 @@ def make_panels_tricolor():
         (255, 0, 0),    # Pannello 1: Rosso
         (0, 255, 0),    # Pannello 2: Verde
         (255, 255, 0),  # Pannello 3: Giallo
+        (255, 0, 255),  # Pannello 4: Magenta
+        (0, 255, 255),  # Pannello 5: Ciano
+        (255, 128, 0),  # Pannello 6: Arancione
     ]
     for i in range(ARDUINO_PANELS_COUNT):
         x_start = i * ARDUINO_PANEL_W
@@ -198,6 +204,9 @@ def make_panels_inverted():
         (255, 255, 0),  # Pannello 1: Giallo
         (0, 0, 255),    # Pannello 2: Blu
         (255, 0, 0),    # Pannello 3: Rosso
+        (0, 255, 255),  # Pannello 4: Ciano
+        (255, 0, 255),  # Pannello 5: Magenta
+        (255, 128, 0),  # Pannello 6: Arancione
     ]
     for i in range(ARDUINO_PANELS_COUNT):
         x_start = i * ARDUINO_PANEL_W
@@ -257,7 +266,7 @@ def show_preview(frame, title="Test Arduino"):
 # ============================================================
 def main():
     print("\n" + "=" * 55)
-    print("  TEST ARDUINO LED MATRICE 32x32")
+    print("  TEST ARDUINO LED MATRICE 56x32")
     print("  Premi i tasti per testare i pattern")
     print("=" * 55)
     print()

@@ -1,5 +1,5 @@
 /*
- * TEST AVANZATO - Matrice LED 32x32 WS2812B
+ * TEST AVANZATO - Matrice LED 56x32 WS2812B
  * ==========================================
  * Comandi seriale (invia un carattere):
  *   '0' = Auto (cambia pattern ogni 8s)
@@ -19,8 +19,8 @@
 
 // --- CONFIGURAZIONE ---
 #define LED_PIN     6
-#define NUM_LEDS    1024
-#define MATRIX_W    32
+#define NUM_LEDS    1792
+#define MATRIX_W    56
 #define MATRIX_H    32
 #define BRIGHTNESS  35        // SICURO: mai alzare sopra 60 senza alimentatore dedicato
 #define LED_TYPE    WS2812B
